@@ -1,0 +1,59 @@
+# ruff configuration - https://beta.ruff.rs/docs/configuration/
+
+# Python target version
+target-version = "py311"
+
+# Show number of potential fixes
+show-fixes = true
+
+# pycodestyle (`E`) and Pyflakes (`F`) are included by default
+extend-select = [
+    "A",        # flake8-builtins
+    "ANN",      # flake8-annotations
+    "ARG",      # flake8-unused-arguments
+    "B",        # flake8-bugbear
+    "BLE",      # flake8-blind-except
+    "C4",       # flake8-comprehensions
+    "C90",      # mccabe complexity
+    "D",        # pydocstyle
+    "N",        # pep8-naming
+    "PTH",      # flake8-use-pathlib
+    "RUF",      # ruff-specific rules
+    "S",        # flake8-bandit
+    "SIM",      # flake8-simplify
+    "TCH",      # flake8-type-checking
+    "TRY",      # tryceratops - try/except
+    "UP",       # pyupgrade
+    "W",        # pycodestyle warnings
+    ]
+
+extend-ignore = [
+    "TRY003",   # Avoid specifying long messages outside the exception class
+    "TRY300",   # Consider moving this statement to an `else` block
+    "ANN401",   # Dynamically typed expressions (typing.Any) are disallowed
+    "D203",     # one-blank-line-before-class - Clashes with D211/no-blank-line-before-class
+    "D213",     # multi-line-summary-second-line - Clashes with D212/multi-line-summary-first-line
+    "ANN101",   # Missing type annotation for `self` in method
+
+    "D100",     # Missing docstring in public module
+    "D101",     # Missing docstring in public class
+    "D103",     # Missing docstring in public function
+    "D104",     # Missing docstring in public package
+
+    "D403",     # First word of the first line should be properly capitalized
+    "D400",     # First line should end with a period
+    "D415",     # First line should end with a period, question mark, or exclamation point
+    "D401"      # First line of docstring should be in imperative mood: "Creates an empty config by default because the config file is optional."
+]
+
+[per-file-ignores]
+# Rules to ignore in tests
+"**/test/*.py" = [
+    "ANN001",   # Missing type annotation for function argument
+    "ANN201",   # Missing return type annotation for public function
+    "S101",     # Use of `assert` detected
+]
+# Rules to ignore in component tests
+"*.py" = [
+    "S101",     # Use of `assert` detected
+]

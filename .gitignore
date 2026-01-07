@@ -1,0 +1,9 @@
+run-at-boot
+__pycache__
+user_guide.pdf
+.envrc
+mypy_results.xml
+.coverage
+dist
+unit_test_results.log
+.idea
