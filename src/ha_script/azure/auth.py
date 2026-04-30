@@ -54,6 +54,12 @@ class RequestSigner(requests.auth.AuthBase):
     def __init__(self) -> None:
         self._token: Optional[Token] = None
 
+    def invalidate(self) -> None:
+        """Discard the cached token, forcing re-acquisition on next use."""
+        if self._token:
+            LOGGER.debug("Invalidating existing token")
+        self._token = None
+
     def __call__(
         self, r: requests.PreparedRequest
     ) -> requests.PreparedRequest:
@@ -68,5 +74,6 @@ def _request_token():
 
     :return: Token object
     """
+    LOGGER.debug("Requesting new token from IMDS")
     data = azure.metadata.get_identity_token()
     return Token(data["access_token"], int(data["expires_on"]))

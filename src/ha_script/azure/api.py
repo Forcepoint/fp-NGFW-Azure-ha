@@ -5,6 +5,7 @@ failover on Azure, including route table manipulation, VM tag
 management, and public IP reassignment.
 """
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 from collections.abc import Iterator
@@ -25,6 +26,9 @@ LOGGER = logging.getLogger(__name__)
 
 ARM_BASE = "https://management.azure.com"
 API_VERSION = "2024-07-01"
+
+LRO_POLL_INTERVAL = 1   # seconds between async operation polls
+LRO_TIMEOUT = 120       # maximum wait in seconds
 
 
 # Type alias for Azure client tuple
@@ -100,6 +104,20 @@ class AzureClient:
             params={"api-version": self._api_version},
             timeout=30,
         )
+        if response.status_code == 401:
+            LOGGER.warning(
+                "Azure API returned 401, refreshing token and retrying: "
+                "%s %s", method, url,
+            )
+            self._signer.invalidate()
+            response = self._session.request(
+                method=method,
+                url=url,
+                auth=self._signer,
+                json=body,
+                params={"api-version": self._api_version},
+                timeout=30,
+            )
         if not response.ok:
             LOGGER.error(
                 "Azure API request failed: %s %s"
@@ -108,7 +126,88 @@ class AzureClient:
                 response.status_code, response.text,
             )
         response.raise_for_status()
+
+        if method in ("PUT", "PATCH", "POST", "DELETE"):
+            self._poll_lro(response)
+
         return response
+
+    def _poll_lro(self, response: requests.Response) -> None:
+        """Poll an Azure long-running operation until it completes.
+
+        Azure ARM mutating operations may be asynchronous. When the
+        response includes an Azure-AsyncOperation or Location header,
+        the caller must poll that URL until the operation reaches a
+        terminal state.  Azure-AsyncOperation takes precedence over
+        Location.  The Retry-After header, when present, dictates the
+        polling interval.
+
+        https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/async-operations
+        """
+        poll_url = (response.headers.get("Azure-AsyncOperation")
+                    or response.headers.get("Location"))
+        if not poll_url:
+            return
+
+        LOGGER.debug("Polling Azure async operation: %s", poll_url)
+        deadline = time.monotonic() + LRO_TIMEOUT
+        while time.monotonic() < deadline:
+            poll_resp = self._session.get(
+                poll_url,
+                auth=self._signer,
+                timeout=30,
+            )
+            if poll_resp.status_code == 401:
+                LOGGER.warning(
+                    "LRO poll returned 401, refreshing token and retrying:"
+                    " %s", poll_url,
+                )
+                self._signer.invalidate()
+                poll_resp = self._session.get(
+                    poll_url,
+                    auth=self._signer,
+                    timeout=30,
+                )
+            if not poll_resp.ok:
+                LOGGER.error(
+                    "LRO poll failed: %s"
+                    " - Status: %d - Response: %s",
+                    poll_url, poll_resp.status_code, poll_resp.text,
+                )
+            poll_resp.raise_for_status()
+
+            if "Azure-AsyncOperation" in response.headers:
+                status = poll_resp.json().get("status", "")
+                if status == "Succeeded":
+                    LOGGER.debug("Azure async operation succeeded")
+                    return
+                if status in ("Failed", "Canceled"):
+                    error = poll_resp.json().get("error", {})
+                    raise requests.HTTPError(
+                        f"Azure async operation {status.lower()}: "
+                        f"{error.get('code')}: {error.get('message')}",
+                        response=poll_resp,
+                    )
+            elif poll_resp.status_code != 202:
+                # Location-based polling: 202 means still in progress,
+                # any 2xx means complete.
+                LOGGER.debug("Azure async operation (loc) succeeded")
+                return
+
+            try:
+                retry_after = int(poll_resp.headers["Retry-After"])
+            except (KeyError, ValueError, TypeError) as err:
+                LOGGER.debug("Unable to read Retry-After header: %s", str(err))
+                retry_after = LRO_POLL_INTERVAL
+
+            LOGGER.debug("LRO status: %s, retrying in %ds...",
+                         poll_resp.status_code, retry_after)
+            time.sleep(retry_after)
+
+        raise requests.HTTPError(
+            f"Azure async operation timed out after {LRO_TIMEOUT}s",
+            response=response,
+        )
 
     def get(self, resource_group: str, path: str) -> Any:
         return self._request("GET", resource_group, path).json()

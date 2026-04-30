@@ -41,7 +41,7 @@ The following steps must be done when releasing the new version of the script:
 
 1. Change version in `src/ha_script/script.py`, e.g.:
    ```
-   __VERSION__ = "1.0.0"
+   __VERSION__ = "1.0.1"
    ```
 2. Run tests, build documents and deliverables.
    ```
@@ -56,7 +56,7 @@ The following steps must be done when releasing the new version of the script:
    ```
 4. Create pull-request and wait until the pull-request is approved.
 5. Go to GitHub page and click *Create new release*.
-6. Create new tag, e.g. `v1.0.0`.
+6. Create new tag, e.g. `v1.0.1`.
 7. Type *Release title* and *Description*.
 8. Upload the deliveries.
   - `dist/ha_script_installer.py`
