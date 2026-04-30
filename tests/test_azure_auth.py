@@ -86,3 +86,40 @@ def test_request_signer():
     prepared = req.prepare()
     signed = signer(prepared)
     assert signed.headers["Authorization"] == "Bearer my-bearer-token"
+
+
+@responses.activate
+def test_request_signer_invalidate():
+    """RequestSigner.invalidate() clears the cached token."""
+    expires_on = str(int(time.time()) + 3600)
+    responses.add(
+        responses.GET,
+        IMDS_TOKEN_URL,
+        json={
+            "access_token": "token-1",
+            "expires_on": expires_on,
+        },
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        IMDS_TOKEN_URL,
+        json={
+            "access_token": "token-2",
+            "expires_on": expires_on,
+        },
+        status=200,
+    )
+
+    signer = RequestSigner()
+    req = requests.Request("GET", "https://example.com").prepare()
+
+    # First call fetches token-1
+    signed = signer(req)
+    assert signed.headers["Authorization"] == "Bearer token-1"
+
+    # Invalidate and call again — should fetch token-2
+    signer.invalidate()
+    signed = signer(req)
+    assert signed.headers["Authorization"] == "Bearer token-2"
+    assert len(responses.calls) == 2

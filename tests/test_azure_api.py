@@ -5,9 +5,12 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
+import responses
 from conftest import AzureConf
 
 from ha_script.config import HAScriptConfig
+from ha_script.azure import api
 from ha_script.azure.api import (
     get_config_tag_value,
     get_config_tags,
@@ -357,3 +360,39 @@ def test_get_azure_clients_propagates_exception(caplog):
     ]
     assert len(critical_records) == 1
     assert "IMDS unreachable" in critical_records[0].message
+
+
+# --- 401 retry tests ---
+
+NIC_URL = (
+    f"{api.ARM_BASE}/subscriptions/sub-id/resourceGroups/rg"
+    f"/providers/Microsoft.Network/networkInterfaces/test-nic"
+)
+
+
+@responses.activate
+def test_request_retries_on_401_then_succeeds(network_client, caplog):
+    """A 401 on the initial request triggers token refresh and retry."""
+    responses.get(NIC_URL, status=401)
+    responses.get(NIC_URL, json={"id": "nic"}, status=200)
+
+    with caplog.at_level(logging.WARNING, logger="ha_script.azure.api"):
+        result = network_client.get("rg", "/networkInterfaces/test-nic")
+
+    assert result == {"id": "nic"}
+    assert len(responses.calls) == 2
+    network_client._signer.invalidate.assert_called_once()
+    assert "401" in caplog.text
+
+
+@responses.activate
+def test_request_raises_on_double_401(network_client):
+    """Two consecutive 401s should raise HTTPError."""
+    responses.get(NIC_URL, status=401)
+    responses.get(NIC_URL, status=401)
+
+    with pytest.raises(requests.HTTPError):
+        network_client.get("rg", "/networkInterfaces/test-nic")
+
+    assert len(responses.calls) == 2
+    network_client._signer.invalidate.assert_called_once()

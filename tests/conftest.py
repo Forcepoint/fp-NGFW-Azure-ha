@@ -7,8 +7,11 @@ client classes from azure/api.py.
 """
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+from ha_script.azure import api
 
 
 SUB_ID = "00000000-0000-0000-0000-000000000000"
@@ -495,3 +498,12 @@ def mock_send_event_to_smc(monkeypatch: pytest.MonkeyPatch):
        'ha_script.smc_events.send_event_to_smc',
        lambda *args, **_: print(*args)
     )
+
+
+@pytest.fixture
+def network_client():
+    """Create a NetworkClient with mocked dependencies."""
+    with patch("ha_script.azure.metadata.get_subscription_id",
+               return_value="sub-id"):
+        client = api.NetworkClient(MagicMock())
+    return client
