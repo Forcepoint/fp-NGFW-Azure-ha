@@ -31,9 +31,7 @@ def _public_ip_assigned_to_local(
     """
     if not assignee_id:
         return False
-    # The assignee_id is an ipConfiguration resource ID that
-    # contains the NIC name. Check if our WAN NIC name is in it.
-    return local_net_ctx.wan_nic_id in assignee_id
+    return api.is_child_resource_id(assignee_id, local_net_ctx.wan_nic_id)
 
 
 def get_primary_probe_ip_addresses(config: HAScriptConfig,
@@ -397,8 +395,8 @@ def secondary_main_loop_handler(config: HAScriptConfig,
 def mainloop(config: HAScriptConfig, clients: api.AzureClients) -> None:
     """Loop forever
 
-    Expected exceptions (e.g. Azure API) are caught and do not exit the mainloop.
-    Unexpected exceptions must be handled by the caller.
+    Expected exceptions (e.g. Azure API) are caught and do not exit the
+    mainloop. Unexpected exceptions must be handled by the caller.
     """
     primary = is_primary(config)
     main_loop_handler = (

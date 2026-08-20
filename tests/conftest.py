@@ -52,7 +52,7 @@ class MockComputeClient:
     def get_vm(self, resource_group: str, vm_name: str) -> Dict:
         """Get VM details"""
         for vm in self.state.vms:
-            if vm['name'] == vm_name:
+            if api.same_resource_id(vm['name'], api._resource_name(vm_name)):
                 return vm.copy()
         raise ValueError(f"VM {vm_name} not found")
 
@@ -60,8 +60,10 @@ class MockComputeClient:
                        tags: Dict) -> Dict:
         """Update VM tags (PATCH)"""
         for vm in self.state.vms:
-            if vm['name'] == vm_name:
-                vm['tags'].update(tags)
+            if api.same_resource_id(vm['name'], api._resource_name(vm_name)):
+                # An ARM PATCH replaces the whole tag collection; the
+                # caller is expected to send the tags it wants kept.
+                vm['tags'] = dict(tags)
                 return vm.copy()
         raise ValueError(f"VM {vm_name} not found")
 
@@ -75,18 +77,16 @@ class MockNetworkClient:
     def get_network_interface(self, resource_group: str,
                               nic_name: str) -> Dict:
         """Get network interface details"""
-        name = nic_name.rsplit("/", 1)[-1]
         for nic in self.state.nics:
-            if nic['name'] == name:
+            if api.same_resource_id(nic['name'], api._resource_name(nic_name)):
                 return _deep_copy_dict(nic)
         raise ValueError(f"NIC {nic_name} not found")
 
     def update_network_interface(self, resource_group: str,
                                  nic_name: str, body: Dict) -> Dict:
         """Update network interface (PUT)"""
-        name = nic_name.rsplit("/", 1)[-1]
         for i, nic in enumerate(self.state.nics):
-            if nic['name'] == name:
+            if api.same_resource_id(nic['name'], api._resource_name(nic_name)):
                 self.state.nics[i] = body
                 # Sync public IP ipConfiguration references
                 self._sync_public_ip_refs(body)
@@ -109,7 +109,7 @@ class MockNetworkClient:
                         rt_name: str) -> Dict:
         """Get route table details"""
         for rt in self.state.route_tables:
-            if rt['name'] == rt_name:
+            if api.same_resource_id(rt['name'], api._resource_name(rt_name)):
                 return _deep_copy_dict(rt)
         raise ValueError(f"Route table {rt_name} not found")
 
@@ -117,7 +117,9 @@ class MockNetworkClient:
                      route_name: str, body: Dict) -> Dict:
         """Update an individual route (PUT)"""
         for rt in self.state.route_tables:
-            if rt['name'] != rt_name:
+            if not api.same_resource_id(
+                rt['name'], api._resource_name(rt_name)
+            ):
                 continue
             for j, route in enumerate(rt['properties']['routes']):
                 if route['name'] == route_name:
@@ -132,7 +134,7 @@ class MockNetworkClient:
                       pip_name: str) -> Dict:
         """Get public IP address details"""
         for pip in self.state.public_ips:
-            if pip['name'] == pip_name:
+            if api.same_resource_id(pip['name'], api._resource_name(pip_name)):
                 return _deep_copy_dict(pip)
         raise ValueError(f"Public IP {pip_name} not found")
 
@@ -185,6 +187,8 @@ class AzureConf:
     protected_route_table_name: str
     primary_nic_names: List[str]
     secondary_nic_names: List[str]
+    primary_nic_ids: List[str]
+    secondary_nic_ids: List[str]
     primary_ips: List[str]
     secondary_ips: List[str]
     other_nic_name: str
@@ -456,6 +460,14 @@ def azure_conf() -> AzureConf:
         ],
         secondary_nic_names=[
             secondary_internal_nic, secondary_wan_nic
+        ],
+        primary_nic_ids=[
+            network_id("networkInterfaces", primary_internal_nic),
+            network_id("networkInterfaces", primary_wan_nic),
+        ],
+        secondary_nic_ids=[
+            network_id("networkInterfaces", secondary_internal_nic),
+            network_id("networkInterfaces", secondary_wan_nic),
         ],
         primary_ips=[primary_internal_ip, primary_wan_ip],
         secondary_ips=[

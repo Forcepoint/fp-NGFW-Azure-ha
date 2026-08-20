@@ -44,7 +44,7 @@ def test_online(
 
     clients = (azure_conf.compute_client, azure_conf.network_client)
     primary_ip = azure_conf.primary_ips[0]
-    primary_vnic_id = azure_conf.primary_nic_names[0]
+    primary_vnic_id = azure_conf.primary_nic_ids[0]
     config = HAScriptConfig(
         route_table_id=azure_conf.protected_route_table_name,
         primary_instance_id=azure_conf.primary_vm_name,
@@ -57,7 +57,7 @@ def test_online(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1]
     )
     create_local_net_context.return_value = local_net_ctx
@@ -123,7 +123,7 @@ def test_offline_to_online_success(
 
     primary_ip = azure_conf.primary_ips[0]
     secondary_ip = azure_conf.secondary_ips[0]
-    primary_vnic_id = azure_conf.primary_nic_names[0]
+    primary_vnic_id = azure_conf.primary_nic_ids[0]
 
     # Since we were offline, the secondary has the traffic
     get_route_table_info.return_value = [
@@ -156,7 +156,7 @@ def test_offline_to_online_success(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1]
     )
     create_local_net_context.return_value = local_net_ctx
@@ -210,7 +210,7 @@ def test_offline_to_online_success_with_azure_mock(
     caplog.set_level(logging.INFO)
 
     primary_ip = azure_conf.primary_ips[0]
-    primary_vnic_id = azure_conf.primary_nic_names[0]
+    primary_vnic_id = azure_conf.primary_nic_ids[0]
     secondary_ip = azure_conf.secondary_ips[0]
 
     config = HAScriptConfig(
@@ -225,16 +225,16 @@ def test_offline_to_online_success_with_azure_mock(
     primary_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1]
     )
     create_local_net_context.return_value = primary_net_ctx
 
     # The secondary has traffic initially - update the mock route table
     secondary_net_ctx = api.LocalNetContext(
-        internal_nic_id=azure_conf.secondary_nic_names[0],
+        internal_nic_id=azure_conf.secondary_nic_ids[0],
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_names[1],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
         wan_ip=azure_conf.secondary_ips[1]
     )
     api.update_route_table(config, clients, azure_conf.protected_route_table_name,
@@ -305,7 +305,7 @@ def test_secondary_takeover(
 
     subprocess_call.return_value = 0
     primary_ip = azure_conf.primary_ips[0]
-    primary_vnic_id = azure_conf.primary_nic_names[0]
+    primary_vnic_id = azure_conf.primary_nic_ids[0]
     secondary_ip = azure_conf.secondary_ips[0]
 
     config = HAScriptConfig(
@@ -324,7 +324,7 @@ def test_secondary_takeover(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1]
     )
     create_local_net_context.return_value = local_net_ctx
@@ -383,7 +383,7 @@ def test_online_to_offline_success(
     caplog.set_level(logging.INFO)
 
     primary_ip = azure_conf.primary_ips[0]
-    primary_vnic_id = azure_conf.primary_nic_names[0]
+    primary_vnic_id = azure_conf.primary_nic_ids[0]
 
     config = HAScriptConfig(
         route_table_id=azure_conf.protected_route_table_name,
@@ -401,7 +401,7 @@ def test_online_to_offline_success(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1]
     )
     create_local_net_context.return_value = local_net_ctx
@@ -464,7 +464,7 @@ def test_fail_to_change_status(
     )
 
     primary_ip = azure_conf.primary_ips[0]
-    primary_vnic_id = azure_conf.primary_nic_names[0]
+    primary_vnic_id = azure_conf.primary_nic_ids[0]
 
     ctx = HAScriptContext(
         prev_local_status="online", prev_local_active=True, display_info_needed=True
@@ -476,7 +476,7 @@ def test_fail_to_change_status(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1]
     )
     create_local_net_context.return_value = local_net_ctx

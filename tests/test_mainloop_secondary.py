@@ -47,7 +47,7 @@ def test_secondary_takeover(
     caplog.set_level(logging.INFO)
 
     secondary_ip = azure_conf.secondary_ips[0]
-    secondary_vnic_id = azure_conf.secondary_nic_names[0]
+    secondary_vnic_id = azure_conf.secondary_nic_ids[0]
     primary_ip = azure_conf.primary_ips[0]
     route_table_id = azure_conf.protected_route_table_name
 
@@ -88,7 +88,7 @@ def test_secondary_takeover(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_names[1],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
         wan_ip=azure_conf.secondary_ips[1],
     )
     create_local_net_context.return_value = local_net_ctx
@@ -132,8 +132,8 @@ def test_secondary_takeover_with_azure_mock(
     """Same test using Azure mock. Verifies that only routes via NGFW are modified"""
     caplog.set_level(logging.INFO)
 
-    primary_vnic_id = azure_conf.primary_nic_names[0]
-    secondary_vnic_id = azure_conf.secondary_nic_names[0]
+    primary_vnic_id = azure_conf.primary_nic_ids[0]
+    secondary_vnic_id = azure_conf.secondary_nic_ids[0]
     secondary_ip = azure_conf.secondary_ips[0]
 
     config = HAScriptConfig(
@@ -173,7 +173,7 @@ def test_secondary_takeover_with_azure_mock(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_names[1],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
         wan_ip=azure_conf.secondary_ips[1],
     )
     create_local_net_context.return_value = local_net_ctx
@@ -218,7 +218,7 @@ def test_secondary_no_takeover_when_primary_online(
     caplog.set_level(logging.INFO)
 
     secondary_ip = azure_conf.secondary_ips[0]
-    secondary_vnic_id = azure_conf.secondary_nic_names[0]
+    secondary_vnic_id = azure_conf.secondary_nic_ids[0]
     primary_ip = azure_conf.primary_ips[0]
 
     config = HAScriptConfig(
@@ -257,7 +257,7 @@ def test_secondary_no_takeover_when_primary_online(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_names[1],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
         wan_ip=azure_conf.secondary_ips[1],
     )
     create_local_net_context.return_value = local_net_ctx
@@ -291,7 +291,7 @@ def test_secondary_takeover_on_blackhole_route_with_azure_mock(
     caplog.set_level(logging.INFO)
 
     secondary_ip = azure_conf.secondary_ips[0]
-    secondary_vnic_id = azure_conf.secondary_nic_names[0]
+    secondary_vnic_id = azure_conf.secondary_nic_ids[0]
 
     config = HAScriptConfig(
         route_table_id=azure_conf.protected_route_table_name,
@@ -317,7 +317,7 @@ def test_secondary_takeover_on_blackhole_route_with_azure_mock(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_names[1],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
         wan_ip=azure_conf.secondary_ips[1],
     )
     create_local_net_context.return_value = local_net_ctx

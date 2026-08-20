@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+
+## [1.0.2] - 2026-08-20
+
+- Bug fix for Azure resource naming
+
+
 ## [1.0.1] - 2026-04-30
 
 - More robust temporary token handling

@@ -95,6 +95,9 @@ class HAScriptConfig:
     dry_run: bool = False
 
 
+# Leading segment of a full ARM resource ID, case-folded for matching
+RESOURCE_ID_PREFIX = "/subscriptions/"
+
 MANDATORY_PROPERTIES = [
     "route_table_id",
     "primary_instance_id",
@@ -137,6 +140,18 @@ def _read_custom_properties_file() -> dict[str, Any]:
     return result
 
 
+def _is_resource_id(value: str) -> bool:
+    """Check that a configured value looks like a full ARM resource ID.
+
+    Matched case-insensitively, as Azure resource IDs are (see
+    ha_script.azure.api.same_resource_id).
+
+    :param value: configured property value
+    :return: True if the value looks like a full ARM resource ID
+    """
+    return value.casefold().startswith(RESOURCE_ID_PREFIX)
+
+
 def _validate_config(config_data: dict[str, Any]) -> None:
     """Check if mandatory config parameters are present.
 
@@ -153,9 +168,7 @@ def _validate_config(config_data: dict[str, Any]) -> None:
         ):
             raise HAScriptConfigError(f"Mandatory property is missing: {key}")
 
-    if not config_data["route_table_id"].startswith(
-        "/subscriptions/"
-    ):
+    if not _is_resource_id(config_data["route_table_id"]):
         raise HAScriptConfigError(
             f"Value for 'route_table_id' should start with "
             f"'/subscriptions/': "
@@ -165,9 +178,7 @@ def _validate_config(config_data: dict[str, Any]) -> None:
     reserved_public_ip_id = config_data.get(
         "reserved_public_ip_id"
     )
-    if reserved_public_ip_id and not (
-        reserved_public_ip_id.startswith("/subscriptions/")
-    ):
+    if reserved_public_ip_id and not _is_resource_id(reserved_public_ip_id):
         raise HAScriptConfigError(
             f"Value for 'reserved_public_ip_id' should start "
             f"with '/subscriptions/': "
