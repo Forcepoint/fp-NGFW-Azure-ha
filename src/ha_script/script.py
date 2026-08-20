@@ -14,7 +14,7 @@ import ha_script.daemon as daemon
 import ha_script.smc_events as smc
 
 
-__VERSION__ = "1.0.1"
+__VERSION__ = "1.0.2"
 LOGGER = logging.getLogger(__name__)
 
 

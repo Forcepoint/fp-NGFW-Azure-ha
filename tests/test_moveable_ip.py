@@ -48,9 +48,9 @@ def test_primary_moves_ip_when_becoming_active(
 
     # Mock local network context for primary
     primary_net_ctx = api.LocalNetContext(
-        internal_nic_id=azure_conf.primary_nic_names[0],
+        internal_nic_id=azure_conf.primary_nic_ids[0],
         internal_ip=azure_conf.primary_ips[0],
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1],
     )
     create_local_net_context.return_value = primary_net_ctx
@@ -102,6 +102,14 @@ def test_primary_moves_ip_when_becoming_active(
         for call in send_notification_to_smc.mock_calls
     )
 
+    # The move must be traceable from the logs: the ID the public IP
+    # was taken from and the destination are both logged in full.
+    prev_assignee = (
+        f"{azure_conf.secondary_nic_ids[1]}/ipConfigurations/ipconfig1"
+    )
+    assert prev_assignee in caplog.text
+    assert azure_conf.primary_nic_ids[1] in caplog.text
+
 
 @patch("ha_script.azure.metadata.get_vm_name")
 @patch("ha_script.azure.api.create_local_net_context")
@@ -137,9 +145,9 @@ def test_secondary_moves_ip_on_takeover(
     clients = (azure_conf.compute_client, azure_conf.network_client)
 
     secondary_net_ctx = api.LocalNetContext(
-        internal_nic_id=azure_conf.secondary_nic_names[0],
+        internal_nic_id=azure_conf.secondary_nic_ids[0],
         internal_ip=azure_conf.secondary_ips[0],
-        wan_nic_id=azure_conf.secondary_nic_names[1],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
         wan_ip=azure_conf.secondary_ips[1],
     )
     create_local_net_context.return_value = secondary_net_ctx
@@ -207,7 +215,6 @@ def test_no_ip_move_when_already_assigned(
     caplog.set_level(logging.INFO)
 
     primary_ip = azure_conf.primary_ips[0]
-    primary_nic_name = azure_conf.primary_nic_names[0]
 
     config = HAScriptConfig(
         route_table_id=azure_conf.protected_route_table_name,
@@ -221,9 +228,9 @@ def test_no_ip_move_when_already_assigned(
 
     # Mock local network context for primary
     primary_net_ctx = api.LocalNetContext(
-        internal_nic_id=primary_nic_name,
+        internal_nic_id=azure_conf.primary_nic_ids[0],
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_names[1],
+        wan_nic_id=azure_conf.primary_nic_ids[1],
         wan_ip=azure_conf.primary_ips[1],
     )
     create_local_net_context.return_value = primary_net_ctx
@@ -334,9 +341,9 @@ def test_move_public_ip_basic(azure_conf: AzureConf):
 
     # Create network context for secondary
     secondary_net_ctx = api.LocalNetContext(
-        internal_nic_id=azure_conf.secondary_nic_names[0],
+        internal_nic_id=azure_conf.secondary_nic_ids[0],
         internal_ip=azure_conf.secondary_ips[0],
-        wan_nic_id=azure_conf.secondary_nic_names[1],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
         wan_ip=azure_conf.secondary_ips[1],
     )
 
@@ -357,3 +364,41 @@ def test_move_public_ip_basic(azure_conf: AzureConf):
     pip_ref = nic['properties']['ipConfigurations'][0]['properties'].get('publicIPAddress', {})
     assert pip_ref.get('id', '').endswith(azure_conf.reserved_public_ip_name)
 
+
+def test_move_public_ip_logs_both_resource_ids(
+    azure_conf: AzureConf,
+    caplog,
+):
+    """move_public_ip() logs the full source and destination IDs.
+
+    The assignee ID comes from the Network API and the destination from
+    the Compute API.  A mismatch between the two is only explainable if
+    both are logged as they were read.
+    """
+    caplog.set_level(logging.INFO)
+
+    config = HAScriptConfig(
+        route_table_id=azure_conf.protected_route_table_name,
+        primary_instance_id=azure_conf.primary_vm_name,
+        secondary_instance_id=azure_conf.secondary_vm_name,
+        reserved_public_ip_id=azure_conf.reserved_public_ip_name
+    )
+
+    clients = (azure_conf.compute_client, azure_conf.network_client)
+
+    secondary_net_ctx = api.LocalNetContext(
+        internal_nic_id=azure_conf.secondary_nic_ids[0],
+        internal_ip=azure_conf.secondary_ips[0],
+        wan_nic_id=azure_conf.secondary_nic_ids[1],
+        wan_ip=azure_conf.secondary_ips[1],
+    )
+
+    # The public IP is on the primary WAN NIC (set in the fixture).
+    _, prev_assignee = api.resolve_public_ip(config, clients)
+    assert prev_assignee
+
+    api.move_public_ip(config, clients, secondary_net_ctx)
+
+    assert prev_assignee in caplog.text
+    assert azure_conf.secondary_nic_ids[1] in caplog.text
+    assert azure_conf.state.public_ips[0]["id"] in caplog.text

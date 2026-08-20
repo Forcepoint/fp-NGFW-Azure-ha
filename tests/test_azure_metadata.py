@@ -8,6 +8,7 @@ import responses
 
 from ha_script.azure.metadata import (
     METADATA_URL,
+    get_instance_id,
     get_instance_metadata,
     get_vm_name,
     get_resource_group,
@@ -19,11 +20,18 @@ from ha_script.azure.metadata import (
 INSTANCE_URL = f"{METADATA_URL}/instance"
 TOKEN_URL = f"{METADATA_URL}/identity/oauth2/token"
 
+VM_RESOURCE_ID = (
+    "/subscriptions/00000000-0000-0000-0000-000000000000"
+    "/resourceGroups/test-rg/providers/Microsoft.Compute"
+    "/virtualMachines/test-vm"
+)
+
 INSTANCE_RESPONSE = {
     "compute": {
         "name": "test-vm",
         "resourceGroupName": "test-rg",
         "subscriptionId": "00000000-0000-0000-0000-000000000000",
+        "resourceId": VM_RESOURCE_ID,
         "location": "eastus",
     },
     "network": {
@@ -77,3 +85,12 @@ def test_get_identity_token():
     data = get_identity_token()
     assert data["access_token"] == "token-value"
     assert "resource=https" in responses.calls[0].request.url
+
+
+@responses.activate
+def test_get_instance_id_uses_imds_resource_id():
+    """The ID reported by IMDS is used as-is."""
+    responses.add(responses.GET, INSTANCE_URL,
+                  json=INSTANCE_RESPONSE, status=200)
+
+    assert get_instance_id() == VM_RESOURCE_ID

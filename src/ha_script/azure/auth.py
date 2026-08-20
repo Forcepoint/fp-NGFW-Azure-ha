@@ -22,7 +22,8 @@ Example usage:
     >>> from ha_script.azure.auth import RequestSigner
     >>> requests.get(url, auth=RequestSigner())
 
-[1] https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token
+[1] Acquire an access token with a VM managed identity:
+    https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token
 """
 import time
 import logging

@@ -79,13 +79,7 @@ def get_instance_id() -> str:
     :return: full ARM resource ID of this VM
     """
     data = get_instance_metadata()
-    sub = data["compute"]["subscriptionId"]
-    resource_group = data["compute"]["resourceGroupName"]
-    name = data["compute"]["name"]
-    return (
-        f"/subscriptions/{sub}/resourceGroups/{resource_group}"
-        f"/providers/Microsoft.Compute/virtualMachines/{name}"
-    )
+    return str(data["compute"]["resourceId"])
 
 
 def get_location() -> str:

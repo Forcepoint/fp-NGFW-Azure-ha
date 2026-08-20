@@ -27,6 +27,9 @@ LOGGER = logging.getLogger(__name__)
 ARM_BASE = "https://management.azure.com"
 API_VERSION = "2024-07-01"
 
+# Prefix of the Azure VM tags that carry HA script properties
+CONFIG_TAG_PREFIX = "FP_HA_"
+
 LRO_POLL_INTERVAL = 1   # seconds between async operation polls
 LRO_TIMEOUT = 120       # maximum wait in seconds
 
@@ -410,6 +413,45 @@ def _resource_name(resource_id: str) -> str:
     return resource_id.rsplit("/", 1)[-1]
 
 
+def same_resource_id(left: str, right: str) -> bool:
+    """Compare two ARM resource IDs or resource names.
+
+    Azure resource names, and therefore the resource IDs built from
+    them, are case-insensitive.  The casing Azure returns is not
+    guaranteed to match the casing that was originally supplied, and
+    two APIs may report the same resource with different casing, so
+    all comparisons of Azure identifiers must be case-insensitive [1].
+
+    :param left: ARM resource ID or name
+    :param right: ARM resource ID or name
+    :return: True if both name the same resource
+
+    [1] Naming rules and restrictions for Azure resources:
+        https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-name-rules
+        "Always perform a case-insensitive comparison of names."
+    """
+    return left.casefold() == right.casefold()
+
+
+def is_child_resource_id(child_id: str, parent_id: str) -> bool:
+    """Check whether an ARM resource ID is nested under another.
+
+    A child ID is the parent ID followed by "/<type>/<name>", for
+    instance an ipConfiguration of a NIC:
+
+      /subscriptions/../networkInterfaces/my-nic/ipConfigurations/ipconfig1
+
+    The comparison is case-insensitive for the reason given in
+    same_resource_id().  The separator is part of the comparison so
+    that a NIC named "my-nic" does not match a child of "my-nic2".
+
+    :param child_id: ARM resource ID of the nested resource
+    :param parent_id: ARM resource ID of the containing resource
+    :return: True if child_id is nested under parent_id
+    """
+    return child_id.casefold().startswith(f"{parent_id.casefold()}/")
+
+
 def get_azure_clients() -> AzureClients:
     """Initialize and return Azure compute and network clients.
 
@@ -436,11 +478,16 @@ def get_config_tags(
     """Create a dictionary config from Azure VM tags.
 
     Configuration properties are taken from VM tags. Only tags
-    starting with 'FP_HA_' are considered.
+    starting with 'FP_HA_' are considered. Azure tag names are
+    case-insensitive for operations.
 
     :param clients: Azure clients
     :param instance_id: VM name (or derive from IMDS)
     :return: dictionary of config properties
+
+    [1] Use tags to organize your Azure resources:
+        https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/tag-resources
+        "Tag names are case-insensitive for operations."
     """
     compute_client = clients[0]
     resource_group = metadata.get_resource_group()
@@ -454,8 +501,8 @@ def get_config_tags(
         tags = vm.get("tags", {})
         if tags:
             for key, value in tags.items():
-                if key.startswith("FP_HA_"):
-                    tag_key = key.replace("FP_HA_", "")
+                if key.casefold().startswith(CONFIG_TAG_PREFIX.casefold()):
+                    tag_key = key[len(CONFIG_TAG_PREFIX):].casefold()
                     filtered_tags[tag_key] = value
         return filtered_tags
     except Exception as e:
@@ -517,8 +564,13 @@ def set_config_tag(
             instance_id = metadata.get_vm_name()
 
         vm = compute_client.get_vm(resource_group, instance_id)
-        tags = vm.get("tags", {}).copy()
-        tags[f"FP_HA_{tag}"] = value
+        tag_name = f"{CONFIG_TAG_PREFIX}{tag}"
+        tags = {
+            key: val
+            for key, val in vm.get("tags", {}).items()
+            if key.casefold() != tag_name.casefold()
+        }
+        tags[tag_name] = value
         compute_client.update_vm_tags(resource_group, instance_id, tags)
         return True
     except Exception as e:
@@ -750,7 +802,10 @@ def update_route_table(
     return True
 
 
-def detach_public_ip(clients: AzureClients, public_ip_id: str) -> None:
+def detach_public_ip(
+    clients: AzureClients,
+    public_ip_id: str
+) -> Optional[str]:
     """Detach a PublicIPAddress from its currently associated NIC.
 
     Resolves the current assignee from the PublicIPAddress
@@ -761,38 +816,48 @@ def detach_public_ip(clients: AzureClients, public_ip_id: str) -> None:
 
     :param clients: Azure clients
     :param public_ip_id: public IP name or full ARM resource ID
+    :return: ID of the ipConfiguration the public IP was detached from,
+        None if it was not associated with any
     """
     network_client = clients[1]
     resource_group = metadata.get_resource_group()
     public_ip = network_client.get_public_ip(resource_group, public_ip_id)
+    resolved_ip_id = public_ip.get("id", public_ip_id)
 
     try:
         ip_config = public_ip["properties"]["ipConfiguration"]
     except KeyError:
         LOGGER.debug(
-            f"Attempted to detach unassigned public ip {public_ip_id}"
+            "Attempted to detach unassigned public ip %s", resolved_ip_id
         )
-        return
+        return None
 
     try:
         ip_config_id = ip_config["id"]
     except KeyError:
-        LOGGER.debug(f"Public IP {public_ip_id} IP configuration has no ID")
-        return
+        LOGGER.debug(
+            "Public IP %s IP configuration has no ID", resolved_ip_id
+        )
+        return None
 
     # There might be a better way to do this.  Gets the nic name by parsing
-    # assignee ID from PIP ipConfiguration.
+    # assignee ID from PIP ipConfiguration.  Azure does not guarantee the
+    # casing of the segment, so match it case-insensitively.
     parts = ip_config_id.split("/")
+    folded = [part.casefold() for part in parts]
     try:
-        nic_name = parts[parts.index("networkInterfaces") + 1]
+        nic_name = parts[folded.index("networkinterfaces") + 1]
     except (ValueError, IndexError):
         LOGGER.warning(
             "Cannot parse NIC name from ipConfiguration: %s",
             ip_config_id,
         )
-        return
+        return None
 
-    LOGGER.info("Detaching public IP from NIC '%s'.", nic_name)
+    LOGGER.info(
+        "Detaching public IP '%s' from ipConfiguration '%s' of NIC '%s'.",
+        resolved_ip_id, ip_config_id, nic_name,
+    )
     nic = network_client.get_network_interface(resource_group, nic_name)
 
     # Find the matching ipConfiguration
@@ -802,13 +867,25 @@ def detach_public_ip(clients: AzureClients, public_ip_id: str) -> None:
         except KeyError:
             continue
 
-        if nic_public_ip["id"] == public_ip_id:
+        nic_ip_config_id = (
+            nic_ip_config.get("id") or nic_ip_config.get("name")
+        )
+
+        if same_resource_id(nic_public_ip["id"], public_ip_id):
             LOGGER.debug(
-                f"Removing matching public IP {public_ip_id} from NIC"
+                "Removing public IP '%s' from ipConfiguration '%s'",
+                nic_public_ip["id"], nic_ip_config_id,
             )
             del nic_ip_config["properties"]["publicIPAddress"]
+        else:
+            LOGGER.debug(
+                "Keeping public IP '%s' on ipConfiguration '%s',"
+                " it does not match '%s'",
+                nic_public_ip["id"], nic_ip_config_id, public_ip_id,
+            )
 
     network_client.update_network_interface(resource_group, nic_name, nic)
+    return ip_config_id
 
 
 def resolve_public_ip(
@@ -834,6 +911,14 @@ def resolve_public_ip(
     ip_addr = public_ip["properties"]["ipAddress"]
     ip_config = public_ip["properties"].get("ipConfiguration")
     ip_config_id = ip_config["id"] if ip_config else None
+
+    LOGGER.debug(
+        "Resolved public IP '%s': id=%s, address=%s, assignee=%s",
+        config.reserved_public_ip_id,
+        public_ip.get("id", "<no id>"),
+        ip_addr,
+        ip_config_id or "<unassigned>",
+    )
     return ip_addr, ip_config_id
 
 
@@ -869,19 +954,22 @@ def move_public_ip(
     )
 
     # Detach the reserved public IP from its current NIC
-    detach_public_ip(clients, config.reserved_public_ip_id)
+    prev_assignee_id = detach_public_ip(clients, config.reserved_public_ip_id)
 
     # Associate with the new WAN NIC
     wan_nic_id = local_net_ctx.wan_nic_id
     nic = network_client.get_network_interface(resource_group, wan_nic_id)
-    nic["properties"]["ipConfigurations"][0][
-        "properties"
-    ]["publicIPAddress"] = {"id": config.reserved_public_ip_id}
+    ip_config = nic["properties"]["ipConfigurations"][0]
+    ip_config["properties"]["publicIPAddress"] = {
+        "id": config.reserved_public_ip_id
+    }
     network_client.update_network_interface(resource_group, wan_nic_id, nic)
 
     LOGGER.info(
-        "Public IP '%s' has been moved to '%s'.",
-        config.reserved_public_ip_id, wan_nic_id,
+        "Public IP '%s' has been moved from '%s' to '%s'.",
+        config.reserved_public_ip_id,
+        prev_assignee_id or "<unassigned>",
+        ip_config.get("id", wan_nic_id),
     )
     return True
 

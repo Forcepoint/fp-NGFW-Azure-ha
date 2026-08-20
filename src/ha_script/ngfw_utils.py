@@ -6,7 +6,11 @@ from typing import Optional
 
 import ha_script.azure.metadata as metadata
 from ha_script.config import HAScriptConfig
-from ha_script.azure.api import AzureClients, get_config_tag_value
+from ha_script.azure.api import (
+    AzureClients,
+    get_config_tag_value,
+    same_resource_id,
+)
 from ha_script.exceptions import HAScriptConfigError
 
 
@@ -28,24 +32,17 @@ def is_instance_type(config: HAScriptConfig, instance_id_type: str) -> bool:
         raise HAScriptConfigError("Missing primary_instance_id")
     if not config.secondary_instance_id:
         raise HAScriptConfigError("Missing secondary_instance_id")
-    if (
-        instance_id not in [
-            config.primary_instance_id,
-            config.secondary_instance_id
-        ]
-    ):
+    is_primary_id = same_resource_id(instance_id, config.primary_instance_id)
+    is_secondary_id = same_resource_id(
+        instance_id, config.secondary_instance_id
+    )
+    if not is_primary_id and not is_secondary_id:
         raise HAScriptConfigError(
             f"Instance id not configured correctly: {instance_id}"
         )
-    if (
-        instance_id_type == "primary"
-        and instance_id == config.primary_instance_id
-    ):
+    if instance_id_type == "primary" and is_primary_id:
         return True
-    if (
-        instance_id_type == "secondary"
-        and instance_id == config.secondary_instance_id
-    ):
+    if instance_id_type == "secondary" and is_secondary_id:
         return True
     return False
 
