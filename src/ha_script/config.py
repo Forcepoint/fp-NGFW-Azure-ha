@@ -58,6 +58,13 @@ class HAScriptConfig:
     # remote port to probe (see explanations for remote_probe_ip)
     remote_probe_port: int = 80
 
+    # NIC index whose primary private IP is used as the source address
+    # of the remote probe socket, so that the probe leaves through the
+    # interface that reaches the remote site (e.g. the SD-WAN tunnel
+    # selects traffic by source address). Defaults to internal_nic_idx;
+    # -1 marks the property as unset, resolved on startup.
+    remote_probe_nic_idx: int = -1
+
     # timeout in seconds after an attempt by the secondary to connect
     # to the primary is declared failed
     probe_timeout_sec: int = 2
@@ -214,6 +221,12 @@ def _validate_config(config_data: dict[str, Any]) -> None:
                     f"{addr}"
                 )
 
+    if config_data.get("remote_probe_nic_idx", 0) < 0:
+        raise HAScriptConfigError(
+            f"Value for 'remote_probe_nic_idx' must be a NIC index >= 0: "
+            f"{config_data['remote_probe_nic_idx']}"
+        )
+
 
 def load_config(tags: dict[str, Any]) -> HAScriptConfig:
     """Load config from cloud tags and/or SMC custom properties file.
@@ -241,9 +254,9 @@ def load_config(tags: dict[str, Any]) -> HAScriptConfig:
             continue
 
         if key in (
-            "probe_port", "remote_probe_port", "probe_timeout_sec",
-            "probe_max_fail", "log_facility", "check_interval_sec",
-            "internal_nic_idx", "wan_nic_idx"
+            "probe_port", "remote_probe_port", "remote_probe_nic_idx",
+            "probe_timeout_sec", "probe_max_fail", "log_facility",
+            "check_interval_sec", "internal_nic_idx", "wan_nic_idx"
         ):
             config_data[key] = int(value)
 

@@ -16,7 +16,10 @@ from conftest import AzureConf
 from ha_script.azure import api
 from ha_script.config import HAScriptConfig
 from ha_script.context import HAScriptContext
-from ha_script.mainloop import primary_main_loop_handler
+from ha_script.mainloop import (
+    primary_check_remote_hosts,
+    primary_main_loop_handler,
+)
 
 
 @patch("ha_script.mainloop.send_notification_to_smc")
@@ -503,3 +506,30 @@ def test_fail_to_change_status(
     # This is the important part: prev status remains "online" so that
     # the status change is retried on the next iteration
     assert ctx.prev_local_status == "online"
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_primary_check_remote_hosts_uses_remote_probe_src_ip(tcp_probe):
+    """The remote probe binds to local_net_ctx.remote_probe_src_ip."""
+    config = HAScriptConfig(
+        route_table_id="/subscriptions/sub/rt",
+        primary_instance_id="primary-vm",
+        secondary_instance_id="secondary-vm",
+        remote_probe_enabled=True,
+        remote_probe_ip="198.51.100.1",
+        remote_probe_port=80,
+    )
+    ctx = HAScriptContext()
+    local_net_ctx = api.LocalNetContext(
+        internal_nic_id="nic0",
+        internal_ip="10.0.0.10",
+        wan_nic_id="nic1",
+        wan_ip="10.0.1.10",
+        remote_probe_src_ip="10.0.0.20",
+    )
+    tcp_probe.return_value = True
+
+    assert primary_check_remote_hosts(config, ctx, local_net_ctx)
+    tcp_probe.assert_called_once_with(
+        config, ["198.51.100.1"], 80, ctx, source_ip="10.0.0.20",
+    )

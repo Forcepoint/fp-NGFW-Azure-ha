@@ -52,6 +52,10 @@ class LocalNetContext:
     # WAN network private IP address. Resolved on startup.
     wan_ip: Optional[str] = None
 
+    # Source address the remote probe socket binds to. Resolved on
+    # startup from remote_probe_nic_idx.
+    remote_probe_src_ip: str = ""
+
 
 @dataclass
 class RouteInfo:
@@ -647,11 +651,25 @@ def create_local_net_context(
             )
         wan_ip = get_ip_for_nic(clients, wan_nic_id)
 
+    # The remote probe source address defaults to the internal NIC IP;
+    # remote_probe_nic_idx selects another NIC explicitly.
+    remote_probe_src_ip = internal_ip
+    if config.remote_probe_nic_idx >= 0:
+        try:
+            remote_probe_nic_id = vm_nic_refs[config.remote_probe_nic_idx]["id"]
+        except (IndexError, KeyError):
+            raise HAScriptError(
+                f"Failed to find remote probe NIC at index "
+                f"{config.remote_probe_nic_idx}"
+            )
+        remote_probe_src_ip = get_ip_for_nic(clients, remote_probe_nic_id)
+
     ctx = LocalNetContext(
         internal_nic_id=internal_nic_id,
         internal_ip=internal_ip,
         wan_nic_id=wan_nic_id,
         wan_ip=wan_ip,
+        remote_probe_src_ip=remote_probe_src_ip,
     )
     LOGGER.info("created local network context: %s", ctx)
     return ctx

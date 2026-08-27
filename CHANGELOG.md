@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.1.0] - 2026-08-27
+
+- Remote probe source selection
+
+
 ## [1.0.2] - 2026-08-20
 
 - Bug fix for Azure resource naming
