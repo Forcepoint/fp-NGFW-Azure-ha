@@ -101,13 +101,14 @@ is not considered).
 
 #### Probing from Primary to the Remote Host
 
-| Property             | Example                 | Default | Description                                                                                                                                                                          |
-|----------------------|-------------------------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| remote_probe_enabled | true                    | false   | Specifies whether TCP probing mechanism from the Primary to the Remote host(s) is enabled (e.g. to make sure SD-WAN is working properly). Possible values are "true" or "false".     |
-| remote_probe_ip [2]  | 10.100.0.10,10.101.0.10 |         | A comma-separated list of private IP addresses of remote host(s).                                                                                                                    |
-| remote_probe_port    | 8080                    | 80      | Remote port to probe.                                                                                                                                                                |
-| probe_timeout_sec    | 2                       | 2       | Timeout in seconds after an attempt by the Primary to connect Remote hosts is declared as failed.                                                                                    |
-| probe_max_fail       | 10                      | 10      | The number of consecutive failed attempts by the Primary to connect to Remote hosts before starting the switchover procedure (the time will be probe_max_fail * check_interval_sec). |
+| Property                 | Example                 | Default          | Description                                                                                                                                                                          |
+|--------------------------|-------------------------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| remote_probe_enabled     | true                    | false            | Specifies whether TCP probing mechanism from the Primary to the Remote host(s) is enabled (e.g. to make sure SD-WAN is working properly). Possible values are "true" or "false".     |
+| remote_probe_ip [2]      | 10.100.0.10,10.101.0.10 |                  | A comma-separated list of private IP addresses of remote host(s).                                                                                                                    |
+| remote_probe_port        | 8080                    | 80               | Remote port to probe.                                                                                                                                                                |
+| remote_probe_nic_idx [3] | 1                       | internal_nic_idx | NIC index whose primary private IP is used as the source address of the remote probe.                                                                                               |
+| probe_timeout_sec        | 2                       | 2                | Timeout in seconds after an attempt by the Primary to connect Remote hosts is declared as failed.                                                                                    |
+| probe_max_fail           | 10                      | 10               | The number of consecutive failed attempts by the Primary to connect to Remote hosts before starting the switchover procedure (the time will be probe_max_fail * check_interval_sec). |
 
 [2] A comma-separated list of Remote hosts (accessible via the SD-WAN)
 private IP addresses that the Primary Engine probes periodically to make
@@ -115,6 +116,12 @@ sure the SD-WAN tunnel is still up. If none of these addresses responds to
 the probe, the Primary will hand off to the Secondary by putting itself
 offline. This property is mandatory if **remote_probe_enabled** is set to
 **true**.
+
+[3] The NIC index whose primary private IP is used as the source address
+of the remote probe, so that the probe leaves through the interface that
+reaches the remote site (for example when the SD-WAN tunnel selects
+traffic by source address). If unspecified, the internal NIC
+(**internal_nic_idx**) is used.
 
 #### Other Properties
 

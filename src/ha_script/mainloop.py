@@ -56,11 +56,13 @@ def get_primary_probe_ip_addresses(config: HAScriptConfig,
 
 
 def primary_check_remote_hosts(config: HAScriptConfig,
-                               ctx: HAScriptContext) -> bool:
+                               ctx: HAScriptContext,
+                               local_net_ctx: api.LocalNetContext) -> bool:
     """Probe remote hosts to make sure VPN tunnel is still up.
 
     :param config: HAScriptConfig object
     :param ctx: HAScriptContext object
+    :param local_net_ctx: LocalNetContext with the remote probe source address
     :return: True if primary engine was able to connect to at least one remote
              host or the probing is disabled.
     """
@@ -68,7 +70,8 @@ def primary_check_remote_hosts(config: HAScriptConfig,
         return True
 
     ip_addresses = config.remote_probe_ip.split(",")
-    if tcp_probe(config, ip_addresses, config.remote_probe_port, ctx):
+    if tcp_probe(config, ip_addresses, config.remote_probe_port, ctx,
+                 source_ip=local_net_ctx.remote_probe_src_ip):
         return True
 
     return False
@@ -135,7 +138,7 @@ def primary_main_loop_handler(config: HAScriptConfig, clients: api.AzureClients,
     if (
         not need_public_ip_move and
         local_status == "online" and
-        not primary_check_remote_hosts(config, ctx)
+        not primary_check_remote_hosts(config, ctx, local_net_ctx)
     ):
         # We failed to reach all the configured remote IP addressed several
         # times (see config.probe_max_fail). We set the primary offline so that

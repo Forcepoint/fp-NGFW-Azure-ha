@@ -10,6 +10,7 @@ import responses
 from conftest import AzureConf
 
 from ha_script.config import HAScriptConfig
+from ha_script.exceptions import HAScriptError
 from ha_script.azure import api
 from ha_script.azure.api import (
     get_config_tag_value,
@@ -131,6 +132,63 @@ def test_create_local_net_context_success(
             azure_conf.primary_nic_names[1]
         )
         assert ctx.wan_ip == azure_conf.primary_ips[1]
+        # The remote probe source defaults to the internal NIC IP.
+        assert ctx.remote_probe_src_ip == azure_conf.primary_ips[0]
+
+
+def test_create_local_net_context_remote_probe_nic(
+    azure_conf: AzureConf
+) -> None:
+    """remote_probe_nic_idx selects another NIC's private IP."""
+    config = HAScriptConfig(
+        route_table_id=azure_conf.protected_route_table_name,
+        primary_instance_id=azure_conf.primary_vm_name,
+        secondary_instance_id=azure_conf.secondary_vm_name,
+        internal_nic_idx=0,
+        wan_nic_idx=1,
+        remote_probe_nic_idx=1,
+    )
+
+    clients = (
+        azure_conf.compute_client, azure_conf.network_client
+    )
+
+    with patch(
+        'ha_script.azure.metadata.get_vm_name'
+    ) as mock_get_vm_name:
+        mock_get_vm_name.return_value = \
+            azure_conf.primary_vm_name
+
+        ctx = create_local_net_context(config, clients)
+
+        assert ctx.remote_probe_src_ip == azure_conf.primary_ips[1]
+
+
+def test_create_local_net_context_remote_probe_nic_out_of_bounds(
+    azure_conf: AzureConf
+) -> None:
+    config = HAScriptConfig(
+        route_table_id=azure_conf.protected_route_table_name,
+        primary_instance_id=azure_conf.primary_vm_name,
+        secondary_instance_id=azure_conf.secondary_vm_name,
+        internal_nic_idx=0,
+        wan_nic_idx=1,
+        remote_probe_nic_idx=5,
+    )
+
+    clients = (
+        azure_conf.compute_client, azure_conf.network_client
+    )
+
+    with patch(
+        'ha_script.azure.metadata.get_vm_name'
+    ) as mock_get_vm_name:
+        mock_get_vm_name.return_value = \
+            azure_conf.primary_vm_name
+
+        with pytest.raises(HAScriptError,
+                           match="Failed to find remote probe NIC at index 5"):
+            create_local_net_context(config, clients)
 
 
 def test_get_route_table_info_success(
