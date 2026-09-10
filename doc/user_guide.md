@@ -25,7 +25,7 @@ criteria, it takes action to become active and receive the traffic:
 
 - It modifies the Azure route table from the internal network(s) to point to
   the secondary
-- Optionally, it moves a reserved public IP address to the secondary
+- Optionally, it moves one or more reserved public IP addresses to the secondary
 
 ## Operation
 
@@ -37,7 +37,7 @@ The diagram below shows how the HA script operates:
   tag.
 - On the secondary NGFW instance, the script monitors the primary instance
   (TCP probing). If such probing fails, the secondary takes over by
-  re-routing traffic to itself and optionally moving the public IP.
+  re-routing traffic to itself and optionally moving the public IP(s).
 
 ![](./ha_script-operations.png)
 
@@ -62,13 +62,13 @@ source takes precedence.
 
 The following configuration properties are mandatory:
 
-| Property              | Example                              | Default | Description                                                                                                              |
-|-----------------------|--------------------------------------|---------|--------------------------------------------------------------------------------------------------------------------------|
-| route_table_id        | /subscriptions/.../routeTables/my-rt |         | Azure route table resource ID that sends traffic from subnet(s) to the SD-WAN Engine. Can be comma-separated for multiple tables. |
-| internal_nic_idx      | 0                                    | 0       | Internal NIC index that receives the traffic from the route table.                                                       |
-| primary_instance_id   | /subscriptions/.../virtualMachines/primary-ngfw |  | Primary VM resource ID. **Note** Must be declared on both primary and secondary.                                         |
-| secondary_instance_id | /subscriptions/.../virtualMachines/secondary-ngfw | | Secondary VM resource ID. **Note** Must be declared on both primary and secondary.                                     |
-| se_script_path        | /data/config/hooks/policy-applied/99_azure_ha_script_installer.py | | Path on the engine where the installation script is going to be delivered. **Note** Must be a property declared via SMC. |
+| Property              | Example                                                           | Default | Description                                                                                                                       |
+|-----------------------|-------------------------------------------------------------------|---------|-----------------------------------------------------------------------------------------------------------------------------------|
+| route_table_id        | /subscriptions/.../routeTables/my-rt                              |         | Azure route table resource ID that sends traffic from subnet(s) to the SD-WAN Engine. Can be comma-separated for multiple tables. |
+| internal_nic_idx      | 0                                                                 | 0       | Internal NIC index that receives the traffic from the route table.                                                                |
+| primary_instance_id   | /subscriptions/.../virtualMachines/primary-ngfw                   |         | Primary VM resource ID. **Note** Must be declared on both primary and secondary.                                                  |
+| secondary_instance_id | /subscriptions/.../virtualMachines/secondary-ngfw                 |         | Secondary VM resource ID. **Note** Must be declared on both primary and secondary.                                                |
+| se_script_path        | /data/config/hooks/policy-applied/99_azure_ha_script_installer.py |         | Path on the engine where the installation script is going to be delivered. **Note** Must be a property declared via SMC.          |
 
 ### Optional properties
 
@@ -76,22 +76,39 @@ The following configuration properties are optional.
 
 #### Moveable public IP
 
-| Property                  | Example                       | Default     | Description                                                                             |
-|---------------------------|-------------------------------|-------------|-----------------------------------------------------------------------------------------|
-| reserved_public_ip_id     | /subscriptions/.../publicIPAddresses/my-pip | | Azure static public IP resource ID to move during failover. Requires matching wan_nic_idx. |
-| wan_nic_idx               | 1                             | 1           | WAN NIC index that receives public traffic. Required with reserved_public_ip_id.        |
+| Property                        | Example                            | Default | Description                                                                                                                                               |
+|---------------------------------|------------------------------------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| reserved_public_ip_\<name\> [1] | 203.0.113.10,10.0.12.10,10.0.22.10 |         | Reserved public IP to move during failover. Triplet format `public_ip,primary_private_ip,secondary_private_ip`. A single resource ID value is deprecated. |
+| wan_nic_idx                     | 1                                  | 1       | WAN NIC index. Only used by the deprecated resource ID format of `reserved_public_ip_<name>`.                                                             |
+
+[1] Two value formats are accepted. The two formats cannot be mixed in a
+single configuration: every `reserved_public_ip_<name>` entry must use the
+same format.
+
+Triplet format: `public_ip,primary_private_ip,secondary_private_ip`. This is
+the reserved public IP address, the target private IP on the primary instance,
+and the target private IP on the secondary instance. Multiple public IPs are
+supported by adding multiple properties with different names (e.g.
+`reserved_public_ip_vpn`, `reserved_public_ip_web`).
+
+Resource ID format: a single resource ID value (e.g.
+`/subscriptions/.../publicIPAddresses/my-pip`). The reserved public IP is
+moved to the primary IP configuration of the NIC at `wan_nic_idx`
+(default 1). Only one resource ID-format entry may be defined per
+configuration. It will be removed in a future release; use the triplet
+format instead.
 
 #### Probing from Secondary to Primary
 
 | Property          | Example                 | Default | Description                                                                                                                                                                           |
 |-------------------|-------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | probe_enabled     | true                    | true    | Specifies whether TCP probing mechanism is enabled. Possible values are "true" or "false".                                                                                            |
-| probe_ip [1]      | 10.101.0.254,10.0.0.254 |         | A comma-separated list of private IP addresses of the Primary Engine used for probing.                                                                                                |
+| probe_ip [2]      | 10.101.0.254,10.0.0.254 |         | A comma-separated list of private IP addresses of the Primary Engine used for probing.                                                                                                |
 | probe_port        | 2222                    | 22      | The TCP port used by the Secondary to probe the Primary. **Note** TCP connections to this port must be allowed in the security rules.                                                 |
 | probe_timeout_sec | 2                       | 2       | Timeout in seconds after an attempt by the Secondary to connect to the Primary is declared as failed.                                                                                 |
 | probe_max_fail    | 10                      | 10      | The number of consecutive failed attempts by the Secondary to connect to the Primary before starting the switchover procedure (the time will be probe_max_fail * check_interval_sec). |
 
-[1] Comma-separated list of private IP addresses of the Primary SD-WAN
+[2] Comma-separated list of private IP addresses of the Primary SD-WAN
 Engine used for probing. If unspecified, all IP addresses of the Primary
 NICs will be used. If none of these addresses respond to the probe, the
 Secondary will take over by changing the Azure route table to the local
@@ -101,27 +118,34 @@ is not considered).
 
 #### Probing from Primary to the Remote Host
 
-| Property                 | Example                 | Default          | Description                                                                                                                                                                          |
-|--------------------------|-------------------------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| remote_probe_enabled     | true                    | false            | Specifies whether TCP probing mechanism from the Primary to the Remote host(s) is enabled (e.g. to make sure SD-WAN is working properly). Possible values are "true" or "false".     |
-| remote_probe_ip [2]      | 10.100.0.10,10.101.0.10 |                  | A comma-separated list of private IP addresses of remote host(s).                                                                                                                    |
-| remote_probe_port        | 8080                    | 80               | Remote port to probe.                                                                                                                                                                |
-| remote_probe_nic_idx [3] | 1                       | internal_nic_idx | NIC index whose primary private IP is used as the source address of the remote probe.                                                                                               |
-| probe_timeout_sec        | 2                       | 2                | Timeout in seconds after an attempt by the Primary to connect Remote hosts is declared as failed.                                                                                    |
-| probe_max_fail           | 10                      | 10               | The number of consecutive failed attempts by the Primary to connect to Remote hosts before starting the switchover procedure (the time will be probe_max_fail * check_interval_sec). |
+| Property                   | Example                 | Default          | Description                                                                                                                                                                          |
+|----------------------------|-------------------------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| remote_probe_enabled       | true                    | false            | Specifies whether TCP probing mechanism from the Primary to the Remote host(s) is enabled (e.g. to make sure SD-WAN is working properly). Possible values are "true" or "false".     |
+| remote_probe_ip [3]        | 10.100.0.10,10.101.0.10 |                  | A comma-separated list of private IP addresses of remote host(s).                                                                                                                    |
+| remote_probe_port          | 8080                    | 80               | Remote port to probe.                                                                                                                                                                |
+| remote_probe_nic_idx [4]   | 1                       | internal_nic_idx | NIC index whose primary private IP is used as the source address of the remote probe.                                                                                                |
+| remote_probe_grace_sec [5] | 180                     | 180              | Grace period in seconds during which failing remote probes are tolerated after startup or an offline to online transition. Set to 0 to disable.                                      |
+| probe_timeout_sec          | 2                       | 2                | Timeout in seconds after an attempt by the Primary to connect Remote hosts is declared as failed.                                                                                    |
+| probe_max_fail             | 10                      | 10               | The number of consecutive failed attempts by the Primary to connect to Remote hosts before starting the switchover procedure (the time will be probe_max_fail * check_interval_sec). |
 
-[2] A comma-separated list of Remote hosts (accessible via the SD-WAN)
+[3] A comma-separated list of Remote hosts (accessible via the SD-WAN)
 private IP addresses that the Primary Engine probes periodically to make
 sure the SD-WAN tunnel is still up. If none of these addresses responds to
 the probe, the Primary will hand off to the Secondary by putting itself
 offline. This property is mandatory if **remote_probe_enabled** is set to
 **true**.
 
-[3] The NIC index whose primary private IP is used as the source address
+[4] The NIC index whose primary private IP is used as the source address
 of the remote probe, so that the probe leaves through the interface that
 reaches the remote site (for example when the SD-WAN tunnel selects
 traffic by source address). If unspecified, the internal NIC
 (**internal_nic_idx**) is used.
+
+[5] During the grace period the cloud platform is still moving the
+route and reserved public IP(s) back to the Primary, so failing remote
+probes do not trigger a new failover. The remote probe settings take
+effect in steady state once the period ends, either at the first
+successful probe or on expiry.
 
 #### Other Properties
 
@@ -164,8 +188,8 @@ definition:
 | `Microsoft.Network/virtualNetworks/subnets/join/action` | Required when updating NIC with subnet reference |
 
 **Note** The public IP and NIC write permissions are only required when
-`reserved_public_ip_id` is configured.  For deployments without a moveable
-public IP, the `Microsoft.Network/publicIPAddresses/*` and
+`reserved_public_ip_<name>` is configured.  For deployments without a
+moveable public IP, the `Microsoft.Network/publicIPAddresses/*` and
 `Microsoft.Network/networkInterfaces/write` permissions can be omitted.
 
 #### Managed Identity Setup
@@ -191,10 +215,10 @@ appear in the Azure instance metadata:
   protected subnet route tables. During failover the HA script updates the
   route table to point to the **private IP address** of this NIC on the newly
   active instance.
-- **WAN NIC** (`wan_nic_idx`): Faces the public internet. When a
-  `reserved_public_ip_id` is configured, the HA script reassigns the
-  reserved public IP to the IP configuration of this NIC on the newly
-  active instance.
+- **WAN NIC** (`wan_nic_idx`): Faces the public internet. Only used by
+  the deprecated resource ID format of `reserved_public_ip_<name>` to
+  locate the target NIC. The triplet format specifies target private IPs
+  explicitly in the configuration.
 
 Both the primary and secondary instances must use the same NIC index
 layout. Ensure that:
@@ -203,6 +227,8 @@ layout. Ensure that:
 2. Each NIC has a primary IP configuration with a private IP assigned.
 3. The internal NIC's subnet is associated with the route table(s)
    specified in `route_table_id`.
+4. When using `reserved_public_ip_<name>`, each instance must have the
+   private IPs specified in the triplet assigned to one of its NICs.
 
 If `probe_ip` is not explicitly set, the secondary discovers the primary's
 probe addresses by enumerating all NICs attached to the primary VM
@@ -225,17 +251,31 @@ If configuring Azure HA for policy based VPN, a static public IP is needed
 to maintain a single IPsec contact address for the replicated nodes.
 
 The HA script can only manage static public IPs, moving them between primary
-and secondary instances during failover.  This public IP is configured
-through `reserved_public_ip_id`.
+and secondary instances during failover. Each static public IP is configured
+via a `reserved_public_ip_<name>` property using the IP triplet format
+(`public_ip,primary_private_ip,secondary_private_ip`). Multiple public IPs
+are supported by adding multiple named properties.
+
+Each public IP needs its own [IP configuration](#network-interfaces-nics)
+on both instances. Ensure that:
+
+1. Each public IP uses the **Standard** SKU with **Static** allocation.
+2. Each public IP is zone-redundant, or in the same availability zone as
+   both instances. The zone of a public IP is fixed at creation.
+3. Each public IP is in the same resource group as the instances.
+4. No public IP is associated with a load balancer front end.
 
 #### Network Security Groups
 
-Ensure network security groups allow:
+Standard SKU public IPs are closed to inbound traffic by default. Ensure
+network security groups allow:
 
 1. **Probing traffic**: TCP from secondary to primary on probe_port (default 22)
 2. **Remote probing** (optional): TCP from primary to remote hosts on
                                   remote_probe_port
 3. **HA traffic**: Traffic routed through the instances
+4. **Reserved public IP traffic**: The services reached through each
+   `reserved_public_ip_<name>` address
 
 ## How to Create Configuration in SMC
 
@@ -264,10 +304,10 @@ Example configuration properties:
 ```
 route_table_id: /subscriptions/.../routeTables/protected-rt
 internal_nic_idx: 0
-wan_nic_idx: 1
 primary_instance_id: /subscriptions/.../virtualMachines/primary-ngfw
 secondary_instance_id: /subscriptions/.../virtualMachines/secondary-ngfw
-reserved_public_ip_id: /subscriptions/.../publicIPAddresses/ha-pip
+reserved_public_ip_vpn: 203.0.113.10,10.0.12.10,10.0.22.10
+reserved_public_ip_web: 203.0.113.20,10.0.12.11,10.0.22.11
 probe_enabled: true
 probe_port: 22
 se_script_path: /data/config/hooks/policy-applied/99_azure_ha_script_installer.py
@@ -359,7 +399,7 @@ FP_HA_probe_port: 22
 
 ## Example: Moveable Public IP
 
-Configuration that updates routes AND moves public IP:
+Configuration that updates routes AND moves public IP(s):
 
 **Primary VM Tags:**
 ```
@@ -367,8 +407,8 @@ FP_HA_route_table_id: /subscriptions/.../routeTables/protected-rt
 FP_HA_primary_instance_id: /subscriptions/.../virtualMachines/primary-ngfw
 FP_HA_secondary_instance_id: /subscriptions/.../virtualMachines/secondary-ngfw
 FP_HA_internal_nic_idx: 0
-FP_HA_wan_nic_idx: 1
-FP_HA_reserved_public_ip_id: /subscriptions/.../publicIPAddresses/ha-pip
+FP_HA_reserved_public_ip_vpn: 203.0.113.10,10.0.12.10,10.0.22.10
+FP_HA_reserved_public_ip_web: 203.0.113.20,10.0.12.11,10.0.22.11
 FP_HA_probe_enabled: true
 FP_HA_probe_port: 22
 ```
@@ -379,8 +419,8 @@ FP_HA_route_table_id: /subscriptions/.../routeTables/protected-rt
 FP_HA_primary_instance_id: /subscriptions/.../virtualMachines/primary-ngfw
 FP_HA_secondary_instance_id: /subscriptions/.../virtualMachines/secondary-ngfw
 FP_HA_internal_nic_idx: 0
-FP_HA_wan_nic_idx: 1
-FP_HA_reserved_public_ip_id: /subscriptions/.../publicIPAddresses/ha-pip
+FP_HA_reserved_public_ip_vpn: 203.0.113.10,10.0.12.10,10.0.22.10
+FP_HA_reserved_public_ip_web: 203.0.113.20,10.0.12.11,10.0.22.11
 FP_HA_probe_enabled: true
 FP_HA_probe_port: 22
 ```
@@ -482,14 +522,14 @@ Script* procedure described above.
 
 If the Azure HA script performs a route failover, the Primary Engine goes
 offline and the traffic is routed through the Secondary Engine. If defined,
-a reserved public IP is also moved to the Secondary Engine.
+reserved public IP(s) are also moved to the Secondary Engine.
 
 Once the issue that caused the failover has been resolved, the system must be
 put to HA ready state manually to recover back to the situation where the
 Primary Engine is handling traffic. Perform the following steps:
 
 1. Put the Primary Engine online to have the script update Azure route tables
-   to point to the Primary Engine again (and move the public IP back if defined)
+   to point to the Primary Engine again (and move the public IP(s) back if defined)
 2. Make sure that VPNs work with both Engines
 3. Make sure that remote probe hosts are accessible through VPNs
 4. Make sure that the Primary Engine probe from the Secondary Engine is
@@ -571,13 +611,19 @@ If the script fails to authenticate to Azure APIs:
 
 #### Reserved Public IP Issues
 
-If the public IP is not moving during failover:
+If the public IP(s) are not moving during failover:
 
-1. Verify `reserved_public_ip_id` is correctly configured
-2. Check the public IP is configured as static allocation
-3. Verify the custom role includes the `Microsoft.Network/publicIPAddresses/*`
+1. Verify `reserved_public_ip_<name>` entries use valid IP triplet format
+   (`public_ip,primary_private_ip,secondary_private_ip`)
+2. Verify the private IPs in each triplet are assigned to NICs on the
+   respective instances
+3. Check the public IP(s) are Standard SKU with static allocation
+4. Check the public IP(s) are in the same resource group as the instances
+5. Check the public IP(s) are zone-redundant, or in the same availability
+   zone as both instances
+6. Verify the custom role includes the `Microsoft.Network/publicIPAddresses/*`
    and `Microsoft.Network/networkInterfaces/*` permissions
-4. Check logs for `PublicIPAddressInUse` errors (public IP still attached to
+7. Check logs for `PublicIPAddressInUse` errors (public IP still attached to
    another NIC)
 
 #### Route Table Update Issues
@@ -594,7 +640,7 @@ If routes are not updating during failover:
 
 If the script cannot find NICs or private IPs:
 
-1. Verify `internal_nic_idx` and `wan_nic_idx` are correct
+1. Verify `internal_nic_idx` is correct (and `wan_nic_idx` if using the deprecated resource ID format)
 2. Check NICs are attached to the VMs in the expected order
 3. Verify private IP addresses are assigned in the NIC IP configurations
 4. Verify the IMDS endpoint is accessible from the VM
@@ -607,7 +653,7 @@ If you are familiar with the AWS HA script, key differences include:
 
 1. **Terminology**: Resource names, documentation and identifiers are adjusted
    for Azure (e.g. ARM resource IDs instead of AWS resource IDs)
-2. **Moveable public IP**: Support for moveable static public IPs
+2. **Moveable public IP(s)**: Support for moving one or more static public IPs
 3. **API**: Direct Azure ARM REST API calls instead of boto3 library
 
 ## Additional Resources

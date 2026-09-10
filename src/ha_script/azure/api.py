@@ -6,7 +6,7 @@ management, and public IP reassignment.
 """
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 from collections.abc import Iterator
 
@@ -17,7 +17,7 @@ import requests.adapters
 import ha_script.azure as az
 import ha_script.azure.auth as auth
 import ha_script.azure.metadata as metadata
-from ha_script.config import HAScriptConfig
+from ha_script.config import HAScriptConfig, _is_resource_id
 from ha_script.exceptions import HAScriptError
 from ha_script.smc_events import send_error_to_smc
 
@@ -43,18 +43,18 @@ class LocalNetContext:
     # Internal NIC name. Resolved on startup.
     internal_nic_id: str
 
-    # WAN NIC name. Resolved on startup.
-    wan_nic_id: str
-
     # Internal network private IP address. Resolved on startup.
     internal_ip: str
-
-    # WAN network private IP address. Resolved on startup.
-    wan_ip: Optional[str] = None
 
     # Source address the remote probe socket binds to. Resolved on
     # startup from remote_probe_nic_idx.
     remote_probe_src_ip: str = ""
+
+    # Resolved at startup:
+    # [(public_ip_id, target_ip_config_id, public_ip_address), ...]
+    public_ip_targets: list[tuple[str, str, str]] = field(
+        default_factory=list
+    )
 
 
 @dataclass
@@ -90,25 +90,26 @@ class AzureClient:
         self._provider = provider
         self._api_version = api_version
 
+    def _url(self, resource_group: str, path: str) -> str:
+        """Build the ARM URL of a provider resource path."""
+        return (
+            f"{ARM_BASE}/subscriptions/{self._sub}"
+            f"/resourceGroups/{resource_group}/providers"
+            f"/{self._provider}{path}?api-version={self._api_version}"
+        )
+
     def _request(
         self,
         method: str,
-        resource_group: str,
-        path: str,
+        url: str,
         body: Any = None,
     ) -> requests.Response:
-        """Make an authenticated request to Azure ARM API."""
-        url = (
-            f"{ARM_BASE}/subscriptions/{self._sub}"
-            f"/resourceGroups/{resource_group}/providers"
-            f"/{self._provider}{path}"
-        )
+        """Make an authenticated request to a fully-formed ARM URL."""
         response = self._session.request(
             method=method,
             url=url,
             auth=self._signer,
             json=body,
-            params={"api-version": self._api_version},
             timeout=30,
         )
         if response.status_code == 401:
@@ -122,7 +123,6 @@ class AzureClient:
                 url=url,
                 auth=self._signer,
                 json=body,
-                params={"api-version": self._api_version},
                 timeout=30,
             )
         if not response.ok:
@@ -217,13 +217,36 @@ class AzureClient:
         )
 
     def get(self, resource_group: str, path: str) -> Any:
-        return self._request("GET", resource_group, path).json()
+        return self._request("GET", self._url(resource_group, path)).json()
+
+    def get_paged(self, resource_group: str, path: str) -> Iterator[Any]:
+        """Iterate over every item of a paged ARM list operation.
+
+        An ARM list operation returns one page of results in "value"
+        and, when further results remain, a "nextLink" URL to the next
+        page.  All pages must be read to see the whole collection.
+
+        https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-implementation#support-pagination-for-requests-that-might-return-large-numbers-of-objects
+
+        :param resource_group: Azure resource group name
+        :param path: provider-relative path of the collection
+        :return: yields each listed resource
+        """
+        url = self._url(resource_group, path)
+        while url:
+            result = self._request("GET", url).json()
+            yield from result.get("value", [])
+            url = result.get("nextLink")
 
     def put(self, resource_group: str, path: str, body: Any) -> Any:
-        return self._request("PUT", resource_group, path, body).json()
+        return self._request(
+            "PUT", self._url(resource_group, path), body
+        ).json()
 
     def patch(self, resource_group: str, path: str, body: Any) -> Any:
-        return self._request("PATCH", resource_group, path, body).json()
+        return self._request(
+            "PATCH", self._url(resource_group, path), body
+        ).json()
 
 
 class ComputeClient(AzureClient):
@@ -407,6 +430,29 @@ class NetworkClient(AzureClient):
             f"/publicIPAddresses/{_resource_name(public_ip_name)}",
         )
 
+    def get_public_ip_by_ip_address(
+        self, resource_group: str, ip_address: str
+    ) -> Optional[dict[str, Any]]:
+        """Find a PublicIPAddress in the resource group by its IP value.
+
+        GET .../Microsoft.Network/publicIPAddresses
+
+        The API has no lookup-by-value endpoint and no server-side
+        filter, so every page of listed resources is matched on
+        properties.ipAddress.  Returns None when no public IP in the
+        resource group holds the IP.
+
+        https://learn.microsoft.com/en-us/rest/api/virtualnetwork/public-ip-addresses/list
+
+        :param resource_group: Azure resource group name
+        :param ip_address: public IP address to look up
+        :return: PublicIPAddress dict, None if no resource holds it
+        """
+        for public_ip in self.get_paged(resource_group, "/publicIPAddresses"):
+            if public_ip.get("properties", {}).get("ipAddress") == ip_address:
+                return public_ip
+        return None
+
 
 def _resource_name(resource_id: str) -> str:
     """Extract the resource name from a full ARM ID or plain name.
@@ -437,23 +483,43 @@ def same_resource_id(left: str, right: str) -> bool:
     return left.casefold() == right.casefold()
 
 
-def is_child_resource_id(child_id: str, parent_id: str) -> bool:
-    """Check whether an ARM resource ID is nested under another.
+def _ip_config_id(nic: dict[str, Any],
+                  ip_config: dict[str, Any]) -> str:
+    """Build the ARM resource ID of a NIC ipConfiguration.
 
-    A child ID is the parent ID followed by "/<type>/<name>", for
-    instance an ipConfiguration of a NIC:
+    A NetworkInterface reports the ID on every ipConfiguration entry;
+    it is composed from the NIC ID and the configuration name when
+    absent.
+
+    :param nic: NetworkInterface dict
+    :param ip_config: NetworkInterfaceIPConfiguration dict
+    :return: ARM resource ID of the ipConfiguration
+    """
+    return ip_config.get("id") or (
+        f"{nic['id']}/ipConfigurations/{ip_config['name']}"
+    )
+
+
+def _nic_name_from_ip_config_id(ip_config_id: str) -> Optional[str]:
+    """Extract the NIC name from a NIC ipConfiguration resource ID.
+
+    An ipConfiguration ID is the NIC ID followed by
+    "/ipConfigurations/<name>", for instance:
 
       /subscriptions/../networkInterfaces/my-nic/ipConfigurations/ipconfig1
 
-    The comparison is case-insensitive for the reason given in
-    same_resource_id().  The separator is part of the comparison so
-    that a NIC named "my-nic" does not match a child of "my-nic2".
+    Azure does not guarantee the casing of the segment, so match it
+    case-insensitively.
 
-    :param child_id: ARM resource ID of the nested resource
-    :param parent_id: ARM resource ID of the containing resource
-    :return: True if child_id is nested under parent_id
+    :param ip_config_id: ARM resource ID of a NIC ipConfiguration
+    :return: NIC name, None if the ID has no networkInterfaces segment
     """
-    return child_id.casefold().startswith(f"{parent_id.casefold()}/")
+    parts = ip_config_id.split("/")
+    folded = [part.casefold() for part in parts]
+    try:
+        return parts[folded.index("networkinterfaces") + 1]
+    except (ValueError, IndexError):
+        return None
 
 
 def get_azure_clients() -> AzureClients:
@@ -610,12 +676,14 @@ def get_ip_for_nic(clients: AzureClients, nic_id: str) -> str:
 
 def create_local_net_context(
     config: HAScriptConfig,
-    clients: AzureClients
+    clients: AzureClients,
+    is_primary: bool = True
 ) -> LocalNetContext:
     """Create a context from the instance networking.
 
     :param config: configuration from the main program
     :param clients: Azure clients
+    :param is_primary: True if this instance is the primary
     :return: Instance of LocalNetContext
     :raises HAScriptError: if NICs not found
     """
@@ -641,16 +709,6 @@ def create_local_net_context(
         )
     internal_ip = get_ip_for_nic(clients, internal_nic_id)
 
-    wan_nic_id, wan_ip = None, None
-    if config.wan_nic_idx is not None:
-        try:
-            wan_nic_id = vm_nic_refs[config.wan_nic_idx]["id"]
-        except (IndexError, KeyError):
-            raise HAScriptError(
-                f"Failed to find wan NIC at index {config.wan_nic_idx}"
-            )
-        wan_ip = get_ip_for_nic(clients, wan_nic_id)
-
     # The remote probe source address defaults to the internal NIC IP;
     # remote_probe_nic_idx selects another NIC explicitly.
     remote_probe_src_ip = internal_ip
@@ -664,12 +722,84 @@ def create_local_net_context(
             )
         remote_probe_src_ip = get_ip_for_nic(clients, remote_probe_nic_id)
 
+    # Build IP address -> ipConfiguration ID map across all NICs for
+    # public IP resolution
+    ip_to_id: dict[str, str] = {}
+    for nic_ref in vm_nic_refs:
+        nic = network_client.get_network_interface(
+            resource_group, nic_ref["id"]
+        )
+        for ip_config in nic["properties"]["ipConfigurations"]:
+            private_ip = ip_config["properties"].get("privateIPAddress")
+            if private_ip:
+                ip_to_id[private_ip] = _ip_config_id(nic, ip_config)
+
+    # Resolve public IP targets from config
+    public_ip_targets: list[tuple[str, str, str]] = []
+    for name, value in config.reserved_public_ips.items():
+        if _is_resource_id(value):
+            # Resource ID format: route to the primary IP configuration
+            # of the wan_nic_idx NIC
+            try:
+                wan_nic_id = vm_nic_refs[config.wan_nic_idx]["id"]
+            except (IndexError, KeyError):
+                raise HAScriptError(
+                    f"Failed to find wan NIC at index {config.wan_nic_idx} "
+                    f"for 'reserved_public_ip_{name}'"
+                )
+            wan_ip = get_ip_for_nic(clients, wan_nic_id)
+            if not wan_ip or wan_ip not in ip_to_id:
+                raise HAScriptError(
+                    f"Failed to find WAN NIC private IP for "
+                    f"'reserved_public_ip_{name}'"
+                )
+            try:
+                public_ip = network_client.get_public_ip(
+                    resource_group, value
+                )
+            except Exception as e:
+                raise HAScriptError(
+                    f"Failed to resolve 'reserved_public_ip_{name}' "
+                    f"'{value}': {e}"
+                ) from e
+            ip_address = public_ip["properties"].get("ipAddress", "")
+            public_ip_targets.append((value, ip_to_id[wan_ip], ip_address))
+        else:
+            # Tuple format: pub_addr,primary_priv_addr,secondary_priv_addr
+            parts = [part.strip() for part in value.split(",")]
+            pub_addr, primary_priv_addr, secondary_priv_addr = parts
+            my_priv_addr = (
+                primary_priv_addr if is_primary else secondary_priv_addr
+            )
+            if my_priv_addr not in ip_to_id:
+                raise HAScriptError(
+                    f"Private IP '{my_priv_addr}' from "
+                    f"'reserved_public_ip_{name}' not found on any NIC"
+                )
+            try:
+                public_ip = network_client.get_public_ip_by_ip_address(
+                    resource_group, pub_addr
+                )
+            except Exception as e:
+                raise HAScriptError(
+                    f"Failed to resolve public IP '{pub_addr}' for "
+                    f"'reserved_public_ip_{name}': {e}"
+                ) from e
+            if public_ip is None:
+                raise HAScriptError(
+                    f"No reserved public IP resource matches '{pub_addr}' "
+                    f"for 'reserved_public_ip_{name}' in resource group "
+                    f"'{resource_group}'"
+                )
+            public_ip_targets.append(
+                (public_ip["id"], ip_to_id[my_priv_addr], pub_addr)
+            )
+
     ctx = LocalNetContext(
         internal_nic_id=internal_nic_id,
         internal_ip=internal_ip,
-        wan_nic_id=wan_nic_id,
-        wan_ip=wan_ip,
         remote_probe_src_ip=remote_probe_src_ip,
+        public_ip_targets=public_ip_targets,
     )
     LOGGER.info("created local network context: %s", ctx)
     return ctx
@@ -681,6 +811,9 @@ def get_route_table_info(
     ngfw_instance_ids: list[str]
 ) -> Iterator[RouteInfo]:
     """Iterate over all routes via NGFWs from the route tables.
+
+    The routes that are not via an NGFW are logged as one line per
+    route table.
 
     :param clients: Azure clients
     :param route_table_ids: comma-separated route table names
@@ -700,6 +833,7 @@ def get_route_table_info(
         rt_name = rt_id.strip()
         route_table = network_client.get_route_table(resource_group, rt_name)
 
+        skipped: list[str] = []
         for route in route_table.get(
             "properties", {}
         ).get("routes", []):
@@ -727,22 +861,34 @@ def get_route_table_info(
                 )
                 continue
 
+            described = (
+                f"{route.get('name', '<unnamed>')} "
+                f"{props.get('addressPrefix', '<unknown>')} "
+                f"{next_hop_type}"
+            )
+
             if next_hop_type != "VirtualAppliance":
-                LOGGER.warning(
-                    "route with non-VirtualAppliance type next hop: %s",
-                    route["name"],
-                )
+                skipped.append(described)
                 continue
 
-            if next_hop_ip in ngfw_ips:
-                yield RouteInfo(
-                    route_state="ACTIVE",
-                    route_dest=props["addressPrefix"],
-                    target_ip_id="",
-                    target_ip=next_hop_ip,
-                    vnic_id=route["name"],
-                    route_table_id=rt_name,
-                )
+            if next_hop_ip not in ngfw_ips:
+                skipped.append(f"{described} {next_hop_ip}")
+                continue
+
+            yield RouteInfo(
+                route_state="ACTIVE",
+                route_dest=props["addressPrefix"],
+                target_ip_id="",
+                target_ip=next_hop_ip,
+                vnic_id=route["name"],
+                route_table_id=rt_name,
+            )
+
+        if skipped:
+            LOGGER.debug(
+                "Route table '%s' routes not via NGFW: %s",
+                rt_name, ", ".join(skipped),
+            )
 
 
 def update_route_table(
@@ -859,13 +1005,9 @@ def detach_public_ip(
         return None
 
     # There might be a better way to do this.  Gets the nic name by parsing
-    # assignee ID from PIP ipConfiguration.  Azure does not guarantee the
-    # casing of the segment, so match it case-insensitively.
-    parts = ip_config_id.split("/")
-    folded = [part.casefold() for part in parts]
-    try:
-        nic_name = parts[folded.index("networkinterfaces") + 1]
-    except (ValueError, IndexError):
+    # assignee ID from PIP ipConfiguration.
+    nic_name = _nic_name_from_ip_config_id(ip_config_id)
+    if nic_name is None:
         LOGGER.warning(
             "Cannot parse NIC name from ipConfiguration: %s",
             ip_config_id,
@@ -906,88 +1048,126 @@ def detach_public_ip(
     return ip_config_id
 
 
-def resolve_public_ip(
-    config: HAScriptConfig,
-    clients: AzureClients
-) -> tuple[Optional[str], Optional[str]]:
-    """Get a public IP and its associated NIC IP config.
+def resolve_public_ip(clients: AzureClients,
+                      public_ip_id: str) -> Optional[str]:
+    """Get the current assignee of a public IP.
 
-    :param config: configuration from the main program
     :param clients: Azure clients
-    :return: tuple of (public IP address, NIC ipConfig ID)
+    :param public_ip_id: public IP name or full ARM resource ID
+    :return: ID of the NIC ipConfiguration currently associated, or None
     """
     network_client = clients[1]
     resource_group = metadata.get_resource_group()
 
-    public_ip = network_client.get_public_ip(resource_group,
-                                             config.reserved_public_ip_id)
+    public_ip = network_client.get_public_ip(resource_group, public_ip_id)
     if not public_ip:
-        raise HAScriptError(
-            f"Unable to resolve public IP {config.reserved_public_ip_id}"
-        )
+        raise HAScriptError(f"Unable to resolve public IP {public_ip_id}")
 
-    ip_addr = public_ip["properties"]["ipAddress"]
+    # ipAddress is absent while a dynamically allocated public IP is
+    # unassociated; fall back to the ID so the log still names it.
+    ip_addr = public_ip["properties"].get("ipAddress") or public_ip_id
     ip_config = public_ip["properties"].get("ipConfiguration")
     ip_config_id = ip_config["id"] if ip_config else None
 
     LOGGER.debug(
         "Resolved public IP '%s': id=%s, address=%s, assignee=%s",
-        config.reserved_public_ip_id,
+        public_ip_id,
         public_ip.get("id", "<no id>"),
         ip_addr,
         ip_config_id or "<unassigned>",
     )
-    return ip_addr, ip_config_id
+    return ip_config_id
 
 
 def move_public_ip(
     config: HAScriptConfig,
     clients: AzureClients,
-    local_net_ctx: LocalNetContext
+    public_ip_id: str,
+    target_ip_config_id: str,
 ) -> bool:
-    """Move reserved public IP to the local instance's WAN NIC.
+    """Move reserved public IP to the given NIC IP configuration
 
     :param config: configuration from the main program
     :param clients: Azure clients
-    :param local_net_ctx: Local network context
-    :return: True if successful, False otherwise
+    :param public_ip_id: public IP name or full ARM resource ID to move
+    :param target_ip_config_id: target NIC ipConfiguration ID
+    :return: True if the move is successful, False otherwise.
     """
     network_client = clients[1]
     resource_group = metadata.get_resource_group()
 
+    try:
+        public_ip = network_client.get_public_ip(resource_group,
+                                                 public_ip_id)
+    except Exception as e:
+        send_error_to_smc(
+            config, f"Failed to get public IP '{public_ip_id}': {e}")
+        return False
+
+    ip_addr = public_ip["properties"].get("ipAddress") or public_ip_id
+
     if config.dry_run:
         LOGGER.warning(
             "DRY-RUN: Do not move public ip '%s',"
-            " wan_nic: %s",
-            config.reserved_public_ip_id, local_net_ctx.wan_nic_id,
+            " ip_config: %s",
+            public_ip_id, target_ip_config_id,
         )
         return True
 
-    if not local_net_ctx.wan_ip:
-        raise HAScriptError("move_public_ip() called with incomplete context")
+    if not target_ip_config_id:
+        send_error_to_smc(
+            config, "move_public_ip() called with incomplete context")
+        return False
+
+    nic_name = _nic_name_from_ip_config_id(target_ip_config_id)
+    if nic_name is None:
+        send_error_to_smc(
+            config,
+            f"Failed to move public IP '{ip_addr}': cannot parse NIC name "
+            f"from ipConfiguration '{target_ip_config_id}'")
+        return False
 
     LOGGER.info(
-        "Moving public IP '%s' to WAN NIC '%s'.",
-        config.reserved_public_ip_id, local_net_ctx.wan_nic_id,
+        "Moving public IP '%s' to ipConfiguration '%s'.",
+        public_ip_id, target_ip_config_id,
     )
 
-    # Detach the reserved public IP from its current NIC
-    prev_assignee_id = detach_public_ip(clients, config.reserved_public_ip_id)
+    try:
+        # Detach the reserved public IP from its current NIC
+        prev_assignee_id = detach_public_ip(clients, public_ip_id)
 
-    # Associate with the new WAN NIC
-    wan_nic_id = local_net_ctx.wan_nic_id
-    nic = network_client.get_network_interface(resource_group, wan_nic_id)
-    ip_config = nic["properties"]["ipConfigurations"][0]
-    ip_config["properties"]["publicIPAddress"] = {
-        "id": config.reserved_public_ip_id
-    }
-    network_client.update_network_interface(resource_group, wan_nic_id, nic)
+        # Associate with the target NIC IP configuration
+        nic = network_client.get_network_interface(resource_group, nic_name)
+        target_ip_config = None
+        for ip_config in nic["properties"]["ipConfigurations"]:
+            if same_resource_id(_ip_config_id(nic, ip_config),
+                                target_ip_config_id):
+                target_ip_config = ip_config
+                break
+
+        if target_ip_config is None:
+            send_error_to_smc(
+                config,
+                f"Failed to move public IP '{ip_addr}': ipConfiguration "
+                f"'{target_ip_config_id}' not found on NIC '{nic_name}'")
+            return False
+
+        target_ip_config["properties"]["publicIPAddress"] = {
+            "id": public_ip_id
+        }
+        network_client.update_network_interface(
+            resource_group, nic_name, nic
+        )
+    except Exception as e:
+        send_error_to_smc(
+            config, f"Failed to move public IP '{ip_addr}': {e}")
+        return False
 
     LOGGER.info(
         "Public IP '%s' has been moved from '%s' to '%s'.",
-        config.reserved_public_ip_id,
+        public_ip_id,
         prev_assignee_id or "<unassigned>",
-        ip_config.get("id", wan_nic_id),
+        target_ip_config_id,
     )
     return True
 

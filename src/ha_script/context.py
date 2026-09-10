@@ -28,3 +28,8 @@ class HAScriptContext:
     #  - for primary, used for remote probing
     #  - for secondary, used for primary probing
     probe_fail_count: int = 0
+
+    # Monotonic deadline until which remote-probe failures are tolerated
+    # after startup or a failover. None once the window ends (first success
+    # or expiry). Managed by primary_check_remote_hosts.
+    probe_grace_deadline: Optional[float] = None

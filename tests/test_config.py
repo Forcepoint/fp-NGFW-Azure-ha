@@ -2,7 +2,12 @@ import logging
 import pytest
 from unittest.mock import patch
 
-from conftest import ROUTE_TABLE_ID, PRIMARY_VM_ID, SECONDARY_VM_ID
+from conftest import (
+    ROUTE_TABLE_ID,
+    PRIMARY_VM_ID,
+    SECONDARY_VM_ID,
+    network_id,
+)
 
 from ha_script.config import load_config
 from ha_script.exceptions import HAScriptConfigError
@@ -39,7 +44,7 @@ def test_load_config_instance_tags(read_custom_properties_file, caplog):
     assert config.secondary_instance_id == SECONDARY_VM_ID
     assert config.internal_nic_idx == 1
     assert config.wan_nic_idx == 1
-    assert not config.reserved_public_ip_id
+    assert not config.reserved_public_ips
 
     assert len(caplog.records) == 1
 
@@ -75,7 +80,7 @@ def test_load_config_custom_properties(read_custom_properties_file, caplog):
     assert config.secondary_instance_id == SECONDARY_VM_ID
     assert config.internal_nic_idx == 1
     assert config.wan_nic_idx == 1
-    assert not config.reserved_public_ip_id
+    assert not config.reserved_public_ips
 
     assert len(caplog.records) == 1
 
@@ -112,7 +117,7 @@ def test_load_config_merged_sources(read_custom_properties_file, caplog):
     assert config.secondary_instance_id == SECONDARY_VM_ID
     assert config.internal_nic_idx == 1
     assert config.wan_nic_idx == 1
-    assert not config.reserved_public_ip_id
+    assert not config.reserved_public_ips
 
     assert len(caplog.records) == 1
 
@@ -279,13 +284,17 @@ def test_remote_probe_ip_comma_separated_invalid_entry(
 
 
 @patch("ha_script.config._read_custom_properties_file")
-def test_load_config_remote_probe_nic_idx(read_custom_properties_file):
+def test_load_config_remote_probe_nic_idx_and_grace(
+    read_custom_properties_file,
+):
     read_custom_properties_file.return_value = {}
     config = load_config({
         **MOCK_MANDATORY_TAGS,
         "remote_probe_nic_idx": "2",
+        "remote_probe_grace_sec": "45",
     })
     assert config.remote_probe_nic_idx == 2
+    assert config.remote_probe_grace_sec == 45
 
 
 @patch("ha_script.config._read_custom_properties_file")
@@ -299,3 +308,162 @@ def test_load_config_invalid_remote_probe_nic_idx(
             "remote_probe_nic_idx": "-2",
         })
     assert "remote_probe_nic_idx" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_remote_probe_grace_sec_defaults_to_180(read_custom_properties_file):
+    read_custom_properties_file.return_value = {}
+    config = load_config({**MOCK_MANDATORY_TAGS})
+    assert config.remote_probe_grace_sec == 180
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_invalid_remote_probe_grace_sec(read_custom_properties_file):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "remote_probe_grace_sec": "-1",
+        })
+    assert "remote_probe_grace_sec" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_legacy_format_valid(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    public_ip_id = network_id("publicIPAddresses", "my-pip")
+    config = load_config({
+        **MOCK_MANDATORY_TAGS,
+        "reserved_public_ip_id": public_ip_id,
+    })
+    assert config.reserved_public_ips == {"id": public_ip_id}
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_legacy_format_invalid(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "reserved_public_ip_id": "not-a-resource-id",
+        })
+    assert "not-a-resource-id" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_triplet_valid(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    config = load_config({
+        **MOCK_MANDATORY_TAGS,
+        "reserved_public_ip_vpn": "203.0.113.10,10.0.1.5,10.0.2.5",
+    })
+    assert config.reserved_public_ips == {
+        "vpn": "203.0.113.10,10.0.1.5,10.0.2.5"
+    }
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_triplet_whitespace_valid(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    config = load_config({
+        **MOCK_MANDATORY_TAGS,
+        "reserved_public_ip_vpn": "203.0.113.10, 10.0.12.10, 10.0.22.10",
+    })
+    assert config.reserved_public_ips == {
+        "vpn": "203.0.113.10, 10.0.12.10, 10.0.22.10"
+    }
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_two_parts_rejected(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "reserved_public_ip_vpn": "203.0.113.10,10.0.1.5",
+        })
+    assert "3 comma-separated" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_invalid_ip_address(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "reserved_public_ip_vpn": "not-an-ip,10.0.1.5,10.0.2.5",
+        })
+    assert "invalid IP address" in str(exc_info.value)
+    assert "not-an-ip" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_empty_parts(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "reserved_public_ip_vpn": "203.0.113.10,,10.0.2.5",
+        })
+    assert "invalid IP address" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_all_empty(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "reserved_public_ip_vpn": ",,",
+        })
+    assert "invalid IP address" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_multiple_legacy_rejected(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "reserved_public_ip_id": network_id(
+                "publicIPAddresses", "my-pip"
+            ),
+            "reserved_public_ip_web": network_id(
+                "publicIPAddresses", "my-pip-2"
+            ),
+        })
+    assert "Only one resource ID-format" in str(exc_info.value)
+
+
+@patch("ha_script.config._read_custom_properties_file")
+def test_reserved_public_ip_mixed_formats_rejected(
+    read_custom_properties_file,
+):
+    read_custom_properties_file.return_value = {}
+    with pytest.raises(HAScriptConfigError) as exc_info:
+        load_config({
+            **MOCK_MANDATORY_TAGS,
+            "reserved_public_ip_id": network_id(
+                "publicIPAddresses", "my-pip"
+            ),
+            "reserved_public_ip_web": "203.0.113.11,10.0.1.6,10.0.2.6",
+        })
+    assert "Cannot mix resource ID and triplet formats" in str(exc_info.value)

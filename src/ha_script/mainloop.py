@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import List
+from typing import List, Optional
 
 import ha_script.azure.api as api
 from ha_script.config import HAScriptConfig
@@ -19,19 +19,19 @@ from ha_script.tcp_probing import tcp_probe
 LOGGER = logging.getLogger(__name__)
 
 
-def _public_ip_assigned_to_local(
-    assignee_id: str,
-    local_net_ctx: api.LocalNetContext
+def _public_ip_assigned_to_target(
+    assignee_id: Optional[str],
+    target_ip_config_id: str
 ) -> bool:
-    """Check if a public IP is assigned to the local WAN NIC.
+    """Check if a public IP is assigned to its target IP configuration.
 
     :param assignee_id: ipConfiguration ID from the public IP
-    :param local_net_ctx: local network context
-    :return: True if the public IP is assigned to local WAN NIC
+    :param target_ip_config_id: target NIC ipConfiguration ID
+    :return: True if the public IP is assigned to the target
     """
     if not assignee_id:
         return False
-    return api.is_child_resource_id(assignee_id, local_net_ctx.wan_nic_id)
+    return api.same_resource_id(assignee_id, target_ip_config_id)
 
 
 def get_primary_probe_ip_addresses(config: HAScriptConfig,
@@ -58,23 +58,63 @@ def get_primary_probe_ip_addresses(config: HAScriptConfig,
 def primary_check_remote_hosts(config: HAScriptConfig,
                                ctx: HAScriptContext,
                                local_net_ctx: api.LocalNetContext) -> bool:
-    """Probe remote hosts to make sure VPN tunnel is still up.
+    """Probe remote hosts to check the VPN tunnel is up.
+
+    The probe only means something once the primary carries traffic. While it
+    was not active on the previous iteration (startup, or a failover still
+    moving routes and public IPs back), the probe is skipped and a grace
+    window (remote_probe_grace_sec) is opened. Once active, failing probes are
+    tolerated until the window's first success or expiry, then probe_max_fail
+    handling resumes. In dry-run mode the skip and the grace window do not
+    apply: the probe runs on every iteration.
 
     :param config: HAScriptConfig object
     :param ctx: HAScriptContext object
     :param local_net_ctx: LocalNetContext with the remote probe source address
-    :return: True if primary engine was able to connect to at least one remote
-             host or the probing is disabled.
+    :return: True on reach, when probing is disabled, or on a tolerated failure
     """
     if not config.remote_probe_enabled:
         return True
 
-    ip_addresses = config.remote_probe_ip.split(",")
-    if tcp_probe(config, ip_addresses, config.remote_probe_port, ctx,
-                 source_ip=local_net_ctx.remote_probe_src_ip):
+    # Not active last iteration: routes and IPs are still moving back, so a
+    # probe would just time out. Skip it and open the grace window. In
+    # dry-run mode prev_local_active is never updated, so this gate would
+    # skip the probe forever; probe unconditionally instead.
+    if not config.dry_run and ctx.prev_local_active is not True:
+        if (
+            config.remote_probe_grace_sec > 0 and
+            ctx.probe_grace_deadline is None
+        ):
+            ctx.probe_grace_deadline = (
+                time.monotonic() + config.remote_probe_grace_sec
+            )
+            ctx.probe_fail_count = 0
+            LOGGER.info("Remote probe grace period armed for %ds.",
+                        config.remote_probe_grace_sec)
         return True
 
-    return False
+    probe_ok = tcp_probe(config, config.remote_probe_ip.split(","),
+                         config.remote_probe_port, ctx,
+                         source_ip=local_net_ctx.remote_probe_src_ip)
+
+    deadline = ctx.probe_grace_deadline
+    if deadline is None:
+        return probe_ok
+
+    if probe_ok and ctx.probe_fail_count == 0:
+        LOGGER.info("Remote probe succeeded; ending grace period.")
+        ctx.probe_grace_deadline = None
+        return True
+    if time.monotonic() < deadline:
+        return True
+    # Window expired without success: clear the counter so normal probing
+    # resumes with a full probe_max_fail budget rather than the partial count
+    # carried over from the window.
+    LOGGER.warning("Remote probe grace period expired without a successful "
+                   "probe; resuming probe_max_fail handling.")
+    ctx.probe_grace_deadline = None
+    ctx.probe_fail_count = 0
+    return True
 
 
 def primary_main_loop_handler(config: HAScriptConfig, clients: api.AzureClients,
@@ -109,6 +149,11 @@ def primary_main_loop_handler(config: HAScriptConfig, clients: api.AzureClients,
         )
         return
 
+    if local_status != "online":
+        # An offline primary has no failback in progress; drop any armed
+        # grace window so the next failback arms a fresh one.
+        ctx.probe_grace_deadline = None
+
     if ctx.prev_local_status is None:
         ctx.prev_local_status = local_status
 
@@ -121,28 +166,26 @@ def primary_main_loop_handler(config: HAScriptConfig, clients: api.AzureClients,
             ctx.prev_local_status = local_status
             ctx.display_info_needed = True
 
-    need_public_ip_move = False
-    public_ip, public_ip_assignee_id = None, None
-
-    if config.reserved_public_ip_id:
-        public_ip, public_ip_assignee_id = api.resolve_public_ip(config,
-                                                                 clients)
-        need_public_ip_move = (
-            local_status == "online"
-            and not _public_ip_assigned_to_local(
-                public_ip_assignee_id,
-                local_net_ctx
-            )
-        )
+    public_ips_to_move: list[tuple[str, str, str]] = []
+    for pub_id, target_id, ip_addr in local_net_ctx.public_ip_targets:
+        try:
+            assignee = api.resolve_public_ip(clients, pub_id)
+        except Exception as e:
+            LOGGER.warning("Failed to resolve public IP '%s': %s", ip_addr, e)
+            continue
+        if local_status == "online" and not _public_ip_assigned_to_target(
+            assignee, target_id
+        ):
+            public_ips_to_move.append((pub_id, target_id, ip_addr))
 
     if (
-        not need_public_ip_move and
+        not public_ips_to_move and
         local_status == "online" and
         not primary_check_remote_hosts(config, ctx, local_net_ctx)
     ):
         # We failed to reach all the configured remote IP addressed several
         # times (see config.probe_max_fail). We set the primary offline so that
-        # the secondary takes over. In case the public IP needs to be moved,
+        # the secondary takes over. In case public IP(s) need to be moved,
         # delay remote check to next iteration as remote is unreachable now.
         local_status = "offline"
         set_local_status(config, local_status)
@@ -227,16 +270,14 @@ def primary_main_loop_handler(config: HAScriptConfig, clients: api.AzureClients,
                 alert=True
             )
 
-    if (
-        need_public_ip_move
-        and api.move_public_ip(config, clients, local_net_ctx)
-    ):
-        send_notification_to_smc(
-            config,
-            f"Public IP address '{public_ip}' moved to primary "
-            f"'{config.primary_instance_id}'.",
-            alert=True
-        )
+    for pub_id, target_id, ip_addr in public_ips_to_move:
+        if api.move_public_ip(config, clients, pub_id, target_id):
+            send_notification_to_smc(
+                config,
+                f"Public IP address '{ip_addr}' moved to primary "
+                f"'{config.primary_instance_id}'.",
+                alert=True
+            )
 
 
 def secondary_main_loop_handler(config: HAScriptConfig,
@@ -304,22 +345,17 @@ def secondary_main_loop_handler(config: HAScriptConfig,
     tcp_probe_fails = config.probe_enabled and not tcp_probe(
         config, primary_ip_addresses, config.probe_port, ctx)
 
-    need_public_ip_move = False
-    public_ip, public_ip_assignee_id = None, None
-    if config.reserved_public_ip_id:
-        public_ip, public_ip_assignee_id = api.resolve_public_ip(config,
-                                                                 clients)
-        need_public_ip_move = (
-            local_status == "online"
-            and not _public_ip_assigned_to_local(
-                public_ip_assignee_id,
-                local_net_ctx
-            )
-            and (
-                tcp_probe_fails or
-                primary_status == "offline"
-            )
-        )
+    public_ips_to_move: list[tuple[str, str, str]] = []
+    for pub_id, target_id, ip_addr in local_net_ctx.public_ip_targets:
+        try:
+            assignee = api.resolve_public_ip(clients, pub_id)
+        except Exception as e:
+            LOGGER.warning("Failed to resolve public IP '%s': %s", ip_addr, e)
+            continue
+        if (local_status == "online"
+                and not _public_ip_assigned_to_target(assignee, target_id)
+                and (tcp_probe_fails or primary_status == "offline")):
+            public_ips_to_move.append((pub_id, target_id, ip_addr))
 
     ngfw_instance_ids = [
         config.primary_instance_id,
@@ -356,7 +392,7 @@ def secondary_main_loop_handler(config: HAScriptConfig,
             primary_status
         )
 
-        if ctx.display_info_needed or need_reroute or need_public_ip_move:
+        if ctx.display_info_needed or need_reroute or public_ips_to_move:
             LOGGER.info(
                 "route_table_id: %s, route_dest: %s, route_state: %s, "
                 "route_table_target: %s, local_ip: %s, primary_status: %s, "
@@ -383,16 +419,14 @@ def secondary_main_loop_handler(config: HAScriptConfig,
                 alert=True
             )
 
-    if (
-        need_public_ip_move
-        and api.move_public_ip(config, clients, local_net_ctx)
-    ):
-        send_notification_to_smc(
-            config,
-            f"Public IP address '{public_ip}' moved to secondary "
-            f"'{config.secondary_instance_id}'.",
-            alert=True
-        )
+    for pub_id, target_id, ip_addr in public_ips_to_move:
+        if api.move_public_ip(config, clients, pub_id, target_id):
+            send_notification_to_smc(
+                config,
+                f"Public IP address '{ip_addr}' moved to "
+                f"secondary '{config.secondary_instance_id}'.",
+                alert=True
+            )
 
 
 def mainloop(config: HAScriptConfig, clients: api.AzureClients) -> None:
@@ -409,7 +443,7 @@ def mainloop(config: HAScriptConfig, clients: api.AzureClients) -> None:
     LOGGER.info("Role is '%s'", "primary" if primary else "secondary")
 
     ctx = HAScriptContext()
-    local_net_ctx = api.create_local_net_context(config, clients)
+    local_net_ctx = api.create_local_net_context(config, clients, primary)
 
     while is_running():
         try:

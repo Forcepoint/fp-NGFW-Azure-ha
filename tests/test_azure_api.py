@@ -128,10 +128,7 @@ def test_create_local_net_context_success(
             azure_conf.primary_nic_names[0]
         )
         assert ctx.internal_ip == azure_conf.primary_ips[0]
-        assert ctx.wan_nic_id.endswith(
-            azure_conf.primary_nic_names[1]
-        )
-        assert ctx.wan_ip == azure_conf.primary_ips[1]
+        assert ctx.public_ip_targets == []
         # The remote probe source defaults to the internal NIC IP.
         assert ctx.remote_probe_src_ip == azure_conf.primary_ips[0]
 
@@ -298,7 +295,7 @@ def test_get_instance_ip_addresses_success(
         clients, azure_conf.primary_vm_name
     )
 
-    assert len(ip_list) == 2
+    assert len(ip_list) == 3
     assert azure_conf.primary_ips[0] in ip_list
     assert azure_conf.primary_ips[1] in ip_list
 
@@ -429,6 +426,16 @@ NIC_URL = (
 
 
 @responses.activate
+def test_request_sends_api_version(network_client):
+    """Every request carries the api-version the client was built with."""
+    responses.get(NIC_URL, json={"id": "nic"}, status=200)
+
+    network_client.get("rg", "/networkInterfaces/test-nic")
+
+    assert f"api-version={api.API_VERSION}" in responses.calls[0].request.url
+
+
+@responses.activate
 def test_request_retries_on_401_then_succeeds(network_client, caplog):
     """A 401 on the initial request triggers token refresh and retry."""
     responses.get(NIC_URL, status=401)
@@ -454,3 +461,141 @@ def test_request_raises_on_double_401(network_client):
 
     assert len(responses.calls) == 2
     network_client._signer.invalidate.assert_called_once()
+
+
+PUBLIC_IPS_URL = (
+    f"{api.ARM_BASE}/subscriptions/sub-id/resourceGroups/rg"
+    f"/providers/Microsoft.Network/publicIPAddresses"
+)
+# Azure returns nextLink as an absolute URL that already carries its
+# api-version, plus an opaque continuation token.
+PUBLIC_IPS_PAGE_1_URL = f"{PUBLIC_IPS_URL}?api-version={api.API_VERSION}"
+PUBLIC_IPS_PAGE_2_URL = (
+    f"{PUBLIC_IPS_URL}?api-version={api.API_VERSION}&%24skipToken=opaque"
+)
+
+
+def _public_ip(name: str, ip_address: str) -> dict:
+    return {
+        "name": name,
+        "id": (
+            f"/subscriptions/sub-id/resourceGroups/rg/providers"
+            f"/Microsoft.Network/publicIPAddresses/{name}"
+        ),
+        "properties": {"ipAddress": ip_address},
+    }
+
+
+@responses.activate
+def test_get_public_ip_by_ip_address_first_page(network_client):
+    """A public IP on the first page is matched without further calls."""
+    responses.get(
+        PUBLIC_IPS_PAGE_1_URL,
+        json={"value": [_public_ip("pip-1", "203.0.113.10")]},
+    )
+
+    public_ip = network_client.get_public_ip_by_ip_address(
+        "rg", "203.0.113.10"
+    )
+
+    assert public_ip["name"] == "pip-1"
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_get_public_ip_by_ip_address_follows_next_link(network_client):
+    """The list operation is paged, so nextLink pages are read too.
+
+    A public IP that only appears on a later page must still be found;
+    stopping at the first page would fail to resolve it.
+    """
+    responses.get(
+        PUBLIC_IPS_PAGE_1_URL,
+        json={
+            "value": [_public_ip("pip-1", "203.0.113.10")],
+            "nextLink": PUBLIC_IPS_PAGE_2_URL,
+        },
+    )
+    responses.get(
+        PUBLIC_IPS_PAGE_2_URL,
+        json={"value": [_public_ip("pip-2", "203.0.113.11")]},
+    )
+
+    public_ip = network_client.get_public_ip_by_ip_address(
+        "rg", "203.0.113.11"
+    )
+
+    assert public_ip["name"] == "pip-2"
+    assert len(responses.calls) == 2
+    # The second call goes to the nextLink URL exactly as Azure gave it
+    assert responses.calls[1].request.url == PUBLIC_IPS_PAGE_2_URL
+
+
+@responses.activate
+def test_get_public_ip_by_ip_address_not_found(network_client):
+    """None is returned when no public IP in the group holds the IP."""
+    responses.get(
+        PUBLIC_IPS_PAGE_1_URL,
+        json={"value": [_public_ip("pip-1", "203.0.113.10")]},
+    )
+
+    assert network_client.get_public_ip_by_ip_address(
+        "rg", "198.51.100.99"
+    ) is None
+
+
+@responses.activate
+def test_get_paged_retries_next_link_on_401(network_client):
+    """A 401 on a nextLink page refreshes the token and retries."""
+    responses.get(
+        PUBLIC_IPS_PAGE_1_URL,
+        json={"value": [], "nextLink": PUBLIC_IPS_PAGE_2_URL},
+    )
+    responses.get(PUBLIC_IPS_PAGE_2_URL, status=401)
+    responses.get(
+        PUBLIC_IPS_PAGE_2_URL,
+        json={"value": [_public_ip("pip-2", "203.0.113.11")]},
+    )
+
+    public_ip = network_client.get_public_ip_by_ip_address(
+        "rg", "203.0.113.11"
+    )
+
+    assert public_ip["name"] == "pip-2"
+    assert len(responses.calls) == 3
+    network_client._signer.invalidate.assert_called_once()
+
+
+def test_routes_not_via_ngfw_logged_compactly(
+    azure_conf: AzureConf, caplog
+) -> None:
+    """Every route that is not acted on is named on one line.
+
+    A route table normally holds routes that bypass the NGFW on
+    purpose.  They are of no interest until something has to be
+    diagnosed, so they are logged as one line rather than one per
+    route.
+    """
+    caplog.set_level(logging.DEBUG)
+    clients = (azure_conf.compute_client, azure_conf.network_client)
+
+    list(get_route_table_info(
+        clients,
+        azure_conf.protected_route_table_name,
+        [azure_conf.primary_vm_name, azure_conf.secondary_vm_name],
+    ))
+
+    reported = [
+        r for r in caplog.records if "routes not via NGFW" in r.getMessage()
+    ]
+    assert len(reported) == 1
+    message = reported[0].getMessage()
+    # The local route bypasses the NGFW, and is named with its next hop
+    assert "local 10.0.0.0/16 VnetLocal" in message
+    # A virtual appliance that is not an NGFW is reported with its address
+    assert (
+        f"other 192.168.0.0/24 VirtualAppliance {azure_conf.other_ip}"
+        in message
+    )
+    # The route via the NGFW is acted on, not reported as skipped
+    assert "default" not in message

@@ -8,6 +8,7 @@ This module tests the primary engine's main loop logic including:
 - Notifying secondary of status changes
 """
 import logging
+import time
 
 from unittest.mock import Mock, patch
 
@@ -60,8 +61,7 @@ def test_online(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_ids[1],
-        wan_ip=azure_conf.primary_ips[1]
+        public_ip_targets=[]
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -159,8 +159,7 @@ def test_offline_to_online_success(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_ids[1],
-        wan_ip=azure_conf.primary_ips[1]
+        public_ip_targets=[]
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -228,8 +227,7 @@ def test_offline_to_online_success_with_azure_mock(
     primary_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_ids[1],
-        wan_ip=azure_conf.primary_ips[1]
+        public_ip_targets=[]
     )
     create_local_net_context.return_value = primary_net_ctx
 
@@ -237,8 +235,7 @@ def test_offline_to_online_success_with_azure_mock(
     secondary_net_ctx = api.LocalNetContext(
         internal_nic_id=azure_conf.secondary_nic_ids[0],
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_ids[1],
-        wan_ip=azure_conf.secondary_ips[1]
+        public_ip_targets=[]
     )
     api.update_route_table(config, clients, azure_conf.protected_route_table_name,
                            "0.0.0.0/0", secondary_net_ctx)
@@ -327,8 +324,7 @@ def test_secondary_takeover(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_ids[1],
-        wan_ip=azure_conf.primary_ips[1]
+        public_ip_targets=[]
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -404,8 +400,7 @@ def test_online_to_offline_success(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_ids[1],
-        wan_ip=azure_conf.primary_ips[1]
+        public_ip_targets=[]
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -479,8 +474,7 @@ def test_fail_to_change_status(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=primary_vnic_id,
         internal_ip=primary_ip,
-        wan_nic_id=azure_conf.primary_nic_ids[1],
-        wan_ip=azure_conf.primary_ips[1]
+        public_ip_targets=[]
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -508,28 +502,207 @@ def test_fail_to_change_status(
     assert ctx.prev_local_status == "online"
 
 
-@patch("ha_script.mainloop.tcp_probe")
-def test_primary_check_remote_hosts_uses_remote_probe_src_ip(tcp_probe):
-    """The remote probe binds to local_net_ctx.remote_probe_src_ip."""
-    config = HAScriptConfig(
+# ---------------------------------------------------------------------------
+# primary_check_remote_hosts grace window
+
+
+def _remote_probe_config() -> HAScriptConfig:
+    return HAScriptConfig(
         route_table_id="/subscriptions/sub/rt",
         primary_instance_id="primary-vm",
         secondary_instance_id="secondary-vm",
         remote_probe_enabled=True,
         remote_probe_ip="198.51.100.1",
-        remote_probe_port=80,
     )
-    ctx = HAScriptContext()
-    local_net_ctx = api.LocalNetContext(
+
+
+def _remote_probe_net_ctx() -> api.LocalNetContext:
+    return api.LocalNetContext(
         internal_nic_id="nic0",
         internal_ip="10.0.0.10",
-        wan_nic_id="nic1",
-        wan_ip="10.0.1.10",
-        remote_probe_src_ip="10.0.0.20",
+        public_ip_targets=[],
+        remote_probe_src_ip="10.0.0.10",
     )
-    tcp_probe.return_value = True
 
-    assert primary_check_remote_hosts(config, ctx, local_net_ctx)
-    tcp_probe.assert_called_once_with(
-        config, ["198.51.100.1"], 80, ctx, source_ip="10.0.0.20",
+
+def _fake_probe(reachable: bool, fail_count: int):
+    """Stand in for tcp_probe: set the fail counter as the real one would."""
+    def _probe(config, ip_addresses, port, ctx, source_ip=""):
+        ctx.probe_fail_count = fail_count
+        return reachable
+    return _probe
+
+
+@patch("ha_script.mainloop.send_notification_to_smc")
+@patch("ha_script.mainloop.tcp_probe")
+@patch("ha_script.mainloop.get_local_status")
+@patch("ha_script.azure.api.get_route_table_info")
+@patch("ha_script.azure.api.set_config_tag")
+def test_offline_clears_grace_deadline(
+    set_config_tag,
+    get_route_table_info,
+    get_local_status,
+    tcp_probe,
+    send_notification_to_smc,
+    azure_conf: AzureConf,
+):
+    """An observed offline status drops any armed grace window (e.g. left
+    over from an aborted failback), so the next failback arms a fresh
+    one instead of inheriting a stale, possibly expired deadline."""
+    config = _remote_probe_config()
+    ctx = HAScriptContext(
+        prev_local_status="offline",
+        prev_local_active=False,
+        probe_grace_deadline=time.monotonic() - 100,
     )
+    clients = (azure_conf.compute_client, azure_conf.network_client)
+    get_local_status.return_value = "offline"
+    get_route_table_info.return_value = []
+
+    primary_main_loop_handler(config, clients, ctx, _remote_probe_net_ctx())
+
+    assert ctx.probe_grace_deadline is None
+    tcp_probe.assert_not_called()
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_skips_probe_while_not_active(tcp_probe):
+    """Not active on the previous iteration (prev_local_active False): the
+    probe is skipped (routes still moving back) and the window is armed."""
+    ctx = HAScriptContext(prev_local_active=False)
+
+    assert primary_check_remote_hosts(
+        _remote_probe_config(), ctx, _remote_probe_net_ctx()
+    )
+    assert ctx.probe_grace_deadline is not None
+    tcp_probe.assert_not_called()
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_skips_probe_on_startup(tcp_probe):
+    """prev_local_active is None at startup: probe skipped, window armed."""
+    ctx = HAScriptContext()
+
+    assert primary_check_remote_hosts(
+        _remote_probe_config(), ctx, _remote_probe_net_ctx()
+    )
+    assert ctx.probe_grace_deadline is not None
+    tcp_probe.assert_not_called()
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_skips_probe_while_not_active_without_grace(tcp_probe):
+    """The skip while not active applies even with the grace window disabled;
+    no window is armed."""
+    config = _remote_probe_config()
+    config.remote_probe_grace_sec = 0
+    ctx = HAScriptContext(prev_local_active=False)
+
+    assert primary_check_remote_hosts(config, ctx, _remote_probe_net_ctx())
+    assert ctx.probe_grace_deadline is None
+    tcp_probe.assert_not_called()
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_probes_in_dry_run_while_not_active(tcp_probe):
+    """Dry-run never updates prev_local_active, so the not-active skip is
+    bypassed: the probe runs even at startup and no window is armed."""
+    tcp_probe.side_effect = _fake_probe(reachable=True, fail_count=0)
+    config = _remote_probe_config()
+    config.dry_run = True
+    ctx = HAScriptContext()
+
+    assert primary_check_remote_hosts(config, ctx, _remote_probe_net_ctx())
+    assert ctx.probe_grace_deadline is None
+    tcp_probe.assert_called_once()
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_dry_run_probe_verdict_stands(tcp_probe):
+    """In dry-run a failing probe verdict is returned unchanged even while
+    not active; no grace tolerance applies."""
+    tcp_probe.side_effect = _fake_probe(reachable=False, fail_count=3)
+    config = _remote_probe_config()
+    config.dry_run = True
+    ctx = HAScriptContext(prev_local_active=False)
+
+    assert not primary_check_remote_hosts(
+        config, ctx, _remote_probe_net_ctx()
+    )
+    assert ctx.probe_grace_deadline is None
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_grace_under_threshold_stays_armed(tcp_probe):
+    """An under-threshold failure (True, counter > 0) is tolerated and does
+    not end the window."""
+    tcp_probe.side_effect = _fake_probe(reachable=True, fail_count=2)
+    ctx = HAScriptContext(prev_local_active=True,
+                          probe_grace_deadline=time.monotonic() + 60)
+
+    assert primary_check_remote_hosts(
+        _remote_probe_config(), ctx, _remote_probe_net_ctx()
+    )
+    assert ctx.probe_grace_deadline is not None
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_grace_ends_on_success(tcp_probe):
+    """The first successful probe (True with the counter back at 0) closes
+    the window."""
+    tcp_probe.side_effect = _fake_probe(reachable=True, fail_count=0)
+    ctx = HAScriptContext(prev_local_active=True,
+                          probe_grace_deadline=time.monotonic() + 60)
+
+    assert primary_check_remote_hosts(
+        _remote_probe_config(), ctx, _remote_probe_net_ctx()
+    )
+    assert ctx.probe_grace_deadline is None
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_no_grace_when_active(tcp_probe):
+    """Active last iteration and no open window: the tcp_probe verdict
+    stands unchanged, and the probe binds the source address resolved
+    from remote_probe_nic_idx."""
+    tcp_probe.side_effect = _fake_probe(reachable=True, fail_count=0)
+    config = _remote_probe_config()
+    ctx = HAScriptContext(prev_local_active=True)
+
+    assert primary_check_remote_hosts(config, ctx, _remote_probe_net_ctx())
+    assert ctx.probe_grace_deadline is None
+    tcp_probe.assert_called_once_with(
+        config, ["198.51.100.1"], config.remote_probe_port, ctx,
+        source_ip="10.0.0.10",
+    )
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_grace_expiry_resumes_normal_probing(tcp_probe):
+    """When the window expires, it is cleared and the fail counter reset so
+    normal probing resumes with a full probe_max_fail budget; the expiry tick
+    itself does not force offline."""
+    tcp_probe.side_effect = _fake_probe(reachable=False, fail_count=3)
+    ctx = HAScriptContext(prev_local_active=True,
+                          probe_grace_deadline=time.monotonic() - 1)
+
+    assert primary_check_remote_hosts(
+        _remote_probe_config(), ctx, _remote_probe_net_ctx()
+    )
+    assert ctx.probe_grace_deadline is None
+    assert ctx.probe_fail_count == 0
+
+
+@patch("ha_script.mainloop.tcp_probe")
+def test_remote_grace_disabled_when_zero(tcp_probe):
+    """With grace disabled and the primary active, a down verdict is respected
+    immediately."""
+    tcp_probe.side_effect = _fake_probe(reachable=False, fail_count=0)
+    config = _remote_probe_config()
+    config.remote_probe_grace_sec = 0
+    ctx = HAScriptContext(prev_local_active=True)
+
+    assert primary_check_remote_hosts(
+        config, ctx, _remote_probe_net_ctx()
+    ) is False
+    assert ctx.probe_grace_deadline is None
