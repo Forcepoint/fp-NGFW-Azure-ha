@@ -2,7 +2,7 @@ import io
 import sys
 import logging
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Union
 
 import ha_script
@@ -65,6 +65,12 @@ class HAScriptConfig:
     # -1 marks the property as unset, resolved on startup.
     remote_probe_nic_idx: int = -1
 
+    # grace period in seconds. After startup or a failover the primary
+    # tolerates failing remote probes for this long while the platform moves
+    # routes and public IPs back. The steady-state remote probe settings
+    # apply once it ends. 0 disables it.
+    remote_probe_grace_sec: int = 180
+
     # timeout in seconds after an attempt by the secondary to connect
     # to the primary is declared failed
     probe_timeout_sec: int = 2
@@ -86,8 +92,15 @@ class HAScriptConfig:
     # WAN nic index that receives public traffic from internet defaults to 0
     wan_nic_idx: int = 1
 
-    # Reserved public IP name used for movable IP. Requires wan_nic_idx.
-    reserved_public_ip_id: str = ""
+    # Reserved public IPs to move during failover. Collected from config keys
+    # matching reserved_public_ip_<name>. Two value formats are accepted; the
+    # two cannot be mixed in a single configuration.
+    #  - Triplet "pub_ip,primary_priv_ip,secondary_priv_ip" (recommended):
+    #    required when declaring multiple reserved public IPs.
+    #  - Resource ID (e.g. "/subscriptions/...", deprecated): routed to the
+    #    private IP on wan_nic_idx. At most one resource ID-format entry is
+    #    allowed. Will be removed in a future release.
+    reserved_public_ips: dict[str, str] = field(default_factory=dict)
 
     # set to true to disable the script
     disabled: bool = False
@@ -182,14 +195,50 @@ def _validate_config(config_data: dict[str, Any]) -> None:
             f"{config_data['route_table_id']}"
         )
 
-    reserved_public_ip_id = config_data.get(
-        "reserved_public_ip_id"
+    reserved_public_ips = config_data.get("reserved_public_ips", {})
+    resource_id_entries: list[str] = []
+    triplet_entries: list[str] = []
+    for name, value in reserved_public_ips.items():
+        if _is_resource_id(value):
+            # Resource ID format: routed via wan_nic_idx
+            resource_id_entries.append(name)
+            continue
+        triplet_entries.append(name)
+        # Tuple format: pub_ip,primary_priv_ip,secondary_priv_ip
+        parts = [part.strip() for part in value.split(",")]
+        if len(parts) != 3:
+            raise HAScriptConfigError(
+                f"Value for 'reserved_public_ip_{name}' must be a resource "
+                f"ID or 3 comma-separated IP addresses: {value!r}"
+            )
+        for part in parts:
+            try:
+                ipaddress.ip_address(part)
+            except ValueError:
+                raise HAScriptConfigError(
+                    f"Value for 'reserved_public_ip_{name}' contains "
+                    f"invalid IP address: {part}"
+                )
+    resource_id_names = ", ".join(
+        f"reserved_public_ip_{n}" for n in resource_id_entries
     )
-    if reserved_public_ip_id and not _is_resource_id(reserved_public_ip_id):
+    triplet_names = ", ".join(
+        f"reserved_public_ip_{n}" for n in triplet_entries
+    )
+    if len(resource_id_entries) > 1:
         raise HAScriptConfigError(
-            f"Value for 'reserved_public_ip_id' should start "
-            f"with '/subscriptions/': "
-            f"{reserved_public_ip_id}"
+            f"Only one resource ID-format reserved_public_ip is allowed "
+            f"(found: {resource_id_names}). "
+            f"Use the 'pub_ip,primary_priv_ip,secondary_priv_ip' format to "
+            f"declare multiple reserved public IPs."
+        )
+    if resource_id_entries and triplet_entries:
+        raise HAScriptConfigError(
+            f"Cannot mix resource ID and triplet formats for "
+            f"reserved_public_ip entries. Resource ID: "
+            f"{resource_id_names}; "
+            f"triplet: {triplet_names}. "
+            f"Use the triplet format for all entries."
         )
 
     if config_data.get("probe_ip"):
@@ -227,6 +276,12 @@ def _validate_config(config_data: dict[str, Any]) -> None:
             f"{config_data['remote_probe_nic_idx']}"
         )
 
+    if config_data.get("remote_probe_grace_sec", 0) < 0:
+        raise HAScriptConfigError(
+            f"Value for 'remote_probe_grace_sec' must be >= 0: "
+            f"{config_data['remote_probe_grace_sec']}"
+        )
+
 
 def load_config(tags: dict[str, Any]) -> HAScriptConfig:
     """Load config from cloud tags and/or SMC custom properties file.
@@ -255,8 +310,9 @@ def load_config(tags: dict[str, Any]) -> HAScriptConfig:
 
         if key in (
             "probe_port", "remote_probe_port", "remote_probe_nic_idx",
-            "probe_timeout_sec", "probe_max_fail", "log_facility",
-            "check_interval_sec", "internal_nic_idx", "wan_nic_idx"
+            "remote_probe_grace_sec", "probe_timeout_sec", "probe_max_fail",
+            "log_facility", "check_interval_sec", "internal_nic_idx",
+            "wan_nic_idx"
         ):
             config_data[key] = int(value)
 
@@ -272,6 +328,18 @@ def load_config(tags: dict[str, Any]) -> HAScriptConfig:
         if key in ("probe_enabled", "remote_probe_enabled",
                    "disabled", "dry_run"):
             config_data[key] = value.lower() == "true"
+
+    # Extract reserved_public_ip_* keys into a dict before constructing
+    # the dataclass (they are not individual dataclass fields).
+    reserved_public_ips: dict[str, str] = {}
+    pub_ip_keys = [
+        k for k in config_data if k.startswith("reserved_public_ip_")
+    ]
+    for key in pub_ip_keys:
+        name = key[len("reserved_public_ip_"):]
+        reserved_public_ips[name] = config_data.pop(key)
+    if reserved_public_ips:
+        config_data["reserved_public_ips"] = reserved_public_ips
 
     _validate_config(config_data)
     config = HAScriptConfig(**config_data)

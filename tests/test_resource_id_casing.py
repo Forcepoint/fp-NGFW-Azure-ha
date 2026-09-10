@@ -13,12 +13,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from conftest import AzureConf
+from conftest import AzureConf, network_id
 from ha_script.azure import api
 from ha_script.azure.api import (
     detach_public_ip,
     get_config_tags,
-    is_child_resource_id,
     same_resource_id,
     set_config_tag,
 )
@@ -44,26 +43,6 @@ def test_same_resource_id_ignores_casing() -> None:
     assert not same_resource_id("my-nic", "my-nic2")
 
 
-def test_is_child_resource_id_ignores_casing() -> None:
-    nic = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/nic1"
-    assert is_child_resource_id(f"{nic}/ipConfigurations/ipconfig1", nic)
-    assert is_child_resource_id(
-        f"{nic}/ipConfigurations/ipconfig1".upper(), nic
-    )
-
-
-def test_is_child_resource_id_requires_a_full_segment() -> None:
-    """A NIC named "nic1" must not match a child of "nic10"."""
-    nic1 = "/subscriptions/s/providers/Microsoft.Network/networkInterfaces/nic1"
-    nic10 = "/subscriptions/s/providers/Microsoft.Network/networkInterfaces/nic10"
-    assert not is_child_resource_id(f"{nic10}/ipConfigurations/ipconfig1", nic1)
-
-
-def test_is_child_resource_id_rejects_the_parent_itself() -> None:
-    nic = "/subscriptions/s/providers/Microsoft.Network/networkInterfaces/nic1"
-    assert not is_child_resource_id(nic, nic)
-
-
 def test_is_resource_id_ignores_casing() -> None:
     assert _is_resource_id("/subscriptions/s/resourceGroups/rg/providers/x/y")
     assert _is_resource_id("/Subscriptions/s/resourceGroups/rg/providers/x/y")
@@ -86,12 +65,13 @@ def test_no_ip_move_when_assignee_casing_differs(
     azure_conf: AzureConf,
     caplog,
 ) -> None:
-    """The public IP is not reassigned to the NIC that already holds it.
+    """The public IP is not reassigned to the ipConfiguration that holds it.
 
-    The WAN NIC ID is read from the Compute API and the ipConfiguration
-    ID of the public IP from the Network API.  When the two report the
-    resource group with different casing, the engine used to detach the
-    public IP from its own NIC and attach it again on every pass.
+    The target ipConfiguration ID is resolved on startup and the
+    ipConfiguration ID of the public IP is read on every pass.  When
+    the two report the resource group with different casing, the engine
+    used to detach the public IP from its own NIC and attach it again
+    on every pass.
     """
     caplog.set_level(logging.INFO)
 
@@ -99,20 +79,27 @@ def test_no_ip_move_when_assignee_casing_differs(
         route_table_id=azure_conf.protected_route_table_name,
         primary_instance_id=azure_conf.primary_vm_name,
         secondary_instance_id=azure_conf.secondary_vm_name,
-        reserved_public_ip_id=azure_conf.reserved_public_ip_name,
+        reserved_public_ips={
+            "vpn": "203.0.113.10,10.0.12.10,10.0.22.10",
+        },
     )
     get_vm_name.return_value = azure_conf.primary_vm_name
     clients = (azure_conf.compute_client, azure_conf.network_client)
 
-    # The Compute API reports the WAN NIC with an upper-cased resource
-    # group, the Network API keeps the original casing.
+    # The resolved target reports the WAN NIC ipConfiguration with an
+    # upper-cased resource group, the public IP keeps the original casing.
     primary_net_ctx = api.LocalNetContext(
         internal_nic_id=azure_conf.primary_nic_ids[0],
         internal_ip=azure_conf.primary_ips[0],
-        wan_nic_id=_recase_resource_group(
-            azure_conf.primary_nic_ids[1], azure_conf.resource_group
-        ),
-        wan_ip=azure_conf.primary_ips[1],
+        public_ip_targets=[
+            (network_id("publicIPAddresses",
+                        azure_conf.reserved_public_ip_name),
+             _recase_resource_group(
+                 azure_conf.primary_ip_config_ids[1],
+                 azure_conf.resource_group
+             ),
+             "203.0.113.10"),
+        ],
     )
     create_local_net_context.return_value = primary_net_ctx
 
@@ -158,6 +145,18 @@ def test_no_ip_move_when_assignee_casing_differs(
     ]
 
 
+def _public_ip_ids_on_nic(azure_conf: AzureConf, nic_name: str) -> set:
+    """Return the public IP IDs referenced by a NIC's ipConfigurations."""
+    nic = azure_conf.network_client.get_network_interface(
+        azure_conf.resource_group, nic_name
+    )
+    return {
+        ip_config["properties"]["publicIPAddress"]["id"]
+        for ip_config in nic["properties"]["ipConfigurations"]
+        if "publicIPAddress" in ip_config["properties"]
+    }
+
+
 def test_detach_public_ip_with_differently_cased_config_id(
     azure_conf: AzureConf,
 ) -> None:
@@ -169,11 +168,9 @@ def test_detach_public_ip_with_differently_cased_config_id(
         pip_id, azure_conf.resource_group
     ))
 
-    nic = azure_conf.network_client.get_network_interface(
-        azure_conf.resource_group, azure_conf.primary_nic_names[1]
+    assert pip_id not in _public_ip_ids_on_nic(
+        azure_conf, azure_conf.primary_nic_names[1]
     )
-    for ip_config in nic["properties"]["ipConfigurations"]:
-        assert "publicIPAddress" not in ip_config["properties"]
 
 
 def test_detach_public_ip_with_differently_cased_ip_configuration(
@@ -189,11 +186,24 @@ def test_detach_public_ip_with_differently_cased_ip_configuration(
 
     detach_public_ip(clients, pip["id"])
 
-    nic = azure_conf.network_client.get_network_interface(
-        azure_conf.resource_group, azure_conf.primary_nic_names[1]
+    assert pip["id"] not in _public_ip_ids_on_nic(
+        azure_conf, azure_conf.primary_nic_names[1]
     )
-    for ip_config in nic["properties"]["ipConfigurations"]:
-        assert "publicIPAddress" not in ip_config["properties"]
+
+
+def test_detach_public_ip_keeps_other_ip_configurations(
+    azure_conf: AzureConf,
+) -> None:
+    """Only the ipConfiguration holding the public IP is changed."""
+    pip_id = azure_conf.state.public_ips[0]["id"]
+    other_pip_id = azure_conf.state.public_ips[1]["id"]
+    clients = (azure_conf.compute_client, azure_conf.network_client)
+
+    detach_public_ip(clients, pip_id)
+
+    assert _public_ip_ids_on_nic(
+        azure_conf, azure_conf.primary_nic_names[1]
+    ) == {other_pip_id}
 
 
 def test_detach_public_ip_without_nic_in_ip_configuration(
@@ -290,3 +300,92 @@ def test_set_config_tag_replaces_existing_case_variant(
     status_keys = [key for key in tags if key.casefold() == "fp_ha_status"]
     assert len(status_keys) == 1
     assert tags[status_keys[0]] == "offline"
+
+
+def _mangle(value: str, rg: str) -> str:
+    """Return the ID as a different API might report it."""
+    return (value
+            .replace(f"/{rg}/", f"/{rg.upper()}/")
+            .replace("/networkInterfaces/", "/networkinterfaces/")
+            .replace("/ipConfigurations/", "/IPCONFIGURATIONS/"))
+
+
+@patch("ha_script.azure.metadata.get_vm_name")
+@patch("ha_script.azure.api.create_local_net_context")
+@patch("ha_script.mainloop.get_local_status")
+@patch("ha_script.mainloop.get_primary_status")
+@patch("ha_script.mainloop.tcp_probe")
+@patch("ha_script.mainloop.send_notification_to_smc")
+def test_no_churn_when_public_ip_api_recases(
+    send_notification_to_smc: Mock, tcp_probe: Mock, get_primary_status: Mock,
+    get_local_status: Mock, create_local_net_context: Mock, get_vm_name: Mock,
+    azure_conf: AzureConf, caplog,
+):
+    """Two polls, public IP API re-casing its ipConfiguration reference."""
+    caplog.set_level(logging.INFO)
+
+    # The publicIPAddresses API reports the assignee with mangled casing
+    for pip in azure_conf.state.public_ips:
+        pip["properties"]["ipConfiguration"]["id"] = _mangle(
+            pip["properties"]["ipConfiguration"]["id"], azure_conf.resource_group
+        )
+
+    config = HAScriptConfig(
+        route_table_id=azure_conf.protected_route_table_name,
+        primary_instance_id=azure_conf.primary_vm_name,
+        secondary_instance_id=azure_conf.secondary_vm_name,
+        reserved_public_ips={
+            "vpn": "203.0.113.10,10.0.12.10,10.0.22.10",
+            "web": "203.0.113.11,10.0.12.11,10.0.22.11",
+        },
+    )
+    get_vm_name.return_value = azure_conf.primary_vm_name
+    clients = (azure_conf.compute_client, azure_conf.network_client)
+
+    ctx_net = api.LocalNetContext(
+        internal_nic_id=azure_conf.primary_nic_ids[0],
+        internal_ip=azure_conf.primary_ips[0],
+        public_ip_targets=[
+            (network_id("publicIPAddresses", azure_conf.reserved_public_ip_name),
+             azure_conf.primary_ip_config_ids[1], "203.0.113.10"),
+            (network_id("publicIPAddresses", azure_conf.reserved_public_ip_name_2),
+             azure_conf.primary_ip_config_wan_2_id, "203.0.113.11"),
+        ],
+    )
+    create_local_net_context.return_value = ctx_net
+    azure_conf.state.route_tables[0]["properties"]["routes"] = [
+        {"name": "default", "properties": {
+            "addressPrefix": "0.0.0.0/0", "nextHopType": "VirtualAppliance",
+            "nextHopIpAddress": azure_conf.primary_ips[0]}},
+    ]
+    get_local_status.return_value = "online"
+
+    ctx = HAScriptContext(prev_local_status="online", prev_local_active=True)
+    for _ in range(2):
+        primary_main_loop_handler(config, clients, ctx, ctx_net)
+
+    assert "Detaching public IP" not in caplog.text
+    assert not [c for c in send_notification_to_smc.mock_calls
+                if "Public IP address" in str(c) and "moved" in str(c)]
+
+
+def test_move_finds_target_ip_config_despite_casing(azure_conf: AzureConf):
+    """move_public_ip() matches the target ipConfiguration case-insensitively."""
+    config = HAScriptConfig(
+        route_table_id=azure_conf.protected_route_table_name,
+        primary_instance_id=azure_conf.primary_vm_name,
+        secondary_instance_id=azure_conf.secondary_vm_name,
+    )
+    clients = (azure_conf.compute_client, azure_conf.network_client)
+
+    assert api.move_public_ip(
+        config, clients,
+        network_id("publicIPAddresses", azure_conf.reserved_public_ip_name),
+        _mangle(azure_conf.secondary_ip_config_ids[1],
+                azure_conf.resource_group),
+    )
+
+    pip = azure_conf.network_client.get_public_ip(
+        azure_conf.resource_group, azure_conf.reserved_public_ip_name)
+    assert pip["properties"]["ipConfiguration"]["id"] == \
+        azure_conf.secondary_ip_config_ids[1]

@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 
 
+## [1.2.0] - 2026-09-10
+
+- Add support for moving multiple public IPs
+- Add a configurable grace period for remote probe
+- Log handling improvements
+
+
 ## [1.1.0] - 2026-08-27
 
 - Remote probe source selection

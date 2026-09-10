@@ -35,6 +35,14 @@ def network_id(resource_type: str, name: str) -> str:
     return arm_id("Microsoft.Network", resource_type, name)
 
 
+def ip_config_id(nic_name: str, ip_config_name: str) -> str:
+    """Build the ARM resource ID of a NIC ipConfiguration."""
+    return (
+        f"{network_id('networkInterfaces', nic_name)}"
+        f"/ipConfigurations/{ip_config_name}"
+    )
+
+
 # Commonly used test resource IDs
 ROUTE_TABLE_ID = network_id("routeTables", "test-rt")
 PRIMARY_VM_ID = compute_id("virtualMachines", "primary-ngfw")
@@ -138,6 +146,14 @@ class MockNetworkClient:
                 return _deep_copy_dict(pip)
         raise ValueError(f"Public IP {pip_name} not found")
 
+    def get_public_ip_by_ip_address(self, resource_group: str,
+                                    ip_address: str) -> Optional[Dict]:
+        """Get public IP by its IP address"""
+        for pip in self.state.public_ips:
+            if pip['properties'].get('ipAddress') == ip_address:
+                return _deep_copy_dict(pip)
+        return None
+
 
 def _collect_pip_ids(nic: Dict) -> Dict[str, str]:
     """Return {public_ip_id: ip_config_name} from a NIC."""
@@ -191,9 +207,14 @@ class AzureConf:
     secondary_nic_ids: List[str]
     primary_ips: List[str]
     secondary_ips: List[str]
+    primary_ip_config_ids: List[str]
+    secondary_ip_config_ids: List[str]
+    primary_ip_config_wan_2_id: str
+    secondary_ip_config_wan_2_id: str
     other_nic_name: str
     other_ip: str
     reserved_public_ip_name: str
+    reserved_public_ip_name_2: str
 
 
 @pytest.fixture
@@ -218,15 +239,18 @@ def azure_conf() -> AzureConf:
     # IPs
     primary_internal_ip = "10.0.11.10"
     primary_wan_ip = "10.0.12.10"
+    primary_wan_2_ip = "10.0.12.11"
     secondary_internal_ip = "10.0.21.10"
     secondary_wan_ip = "10.0.22.10"
+    secondary_wan_2_ip = "10.0.22.11"
     other_ip = "10.0.1.50"
 
     # Route table
     protected_rt_name = "protected-rt"
 
-    # Public IP
+    # Public IPs
     reserved_pip_name = "reserved-pip"
+    reserved_pip_name_2 = "reserved-pip-2"
 
     # Create VMs
     state.vms = [
@@ -303,6 +327,9 @@ def azure_conf() -> AzureConf:
                 'ipConfigurations': [
                     {
                         'name': 'ipconfig1',
+                        'id': ip_config_id(
+                            primary_internal_nic, 'ipconfig1'
+                        ),
                         'properties': {
                             'privateIPAddress': primary_internal_ip,
                             'primary': True,
@@ -320,6 +347,7 @@ def azure_conf() -> AzureConf:
                 'ipConfigurations': [
                     {
                         'name': 'ipconfig1',
+                        'id': ip_config_id(primary_wan_nic, 'ipconfig1'),
                         'properties': {
                             'privateIPAddress': primary_wan_ip,
                             'primary': True,
@@ -330,7 +358,21 @@ def azure_conf() -> AzureConf:
                                 )
                             }
                         }
-                    }
+                    },
+                    {
+                        'name': 'ipconfig2',
+                        'id': ip_config_id(primary_wan_nic, 'ipconfig2'),
+                        'properties': {
+                            'privateIPAddress': primary_wan_2_ip,
+                            'primary': False,
+                            'publicIPAddress': {
+                                'id': network_id(
+                                    "publicIPAddresses",
+                                    reserved_pip_name_2
+                                )
+                            }
+                        }
+                    },
                 ]
             }
         },
@@ -343,6 +385,9 @@ def azure_conf() -> AzureConf:
                 'ipConfigurations': [
                     {
                         'name': 'ipconfig1',
+                        'id': ip_config_id(
+                            secondary_internal_nic, 'ipconfig1'
+                        ),
                         'properties': {
                             'privateIPAddress': secondary_internal_ip,
                             'primary': True,
@@ -360,11 +405,20 @@ def azure_conf() -> AzureConf:
                 'ipConfigurations': [
                     {
                         'name': 'ipconfig1',
+                        'id': ip_config_id(secondary_wan_nic, 'ipconfig1'),
                         'properties': {
                             'privateIPAddress': secondary_wan_ip,
                             'primary': True,
                         }
-                    }
+                    },
+                    {
+                        'name': 'ipconfig2',
+                        'id': ip_config_id(secondary_wan_nic, 'ipconfig2'),
+                        'properties': {
+                            'privateIPAddress': secondary_wan_2_ip,
+                            'primary': False,
+                        }
+                    },
                 ]
             }
         },
@@ -375,6 +429,7 @@ def azure_conf() -> AzureConf:
                 'ipConfigurations': [
                     {
                         'name': 'ipconfig1',
+                        'id': ip_config_id(other_nic, 'ipconfig1'),
                         'properties': {
                             'privateIPAddress': other_ip,
                             'primary': True,
@@ -424,7 +479,7 @@ def azure_conf() -> AzureConf:
         }
     ]
 
-    # Create reserved public IP
+    # Create reserved public IPs
     state.public_ips = [
         {
             'name': reserved_pip_name,
@@ -435,12 +490,20 @@ def azure_conf() -> AzureConf:
                 'ipAddress': '203.0.113.10',
                 'publicIPAllocationMethod': 'Static',
                 'ipConfiguration': {
-                    'id': (
-                        network_id(
-                            "networkInterfaces", primary_wan_nic
-                        )
-                        + "/ipConfigurations/ipconfig1"
-                    )
+                    'id': ip_config_id(primary_wan_nic, 'ipconfig1')
+                }
+            }
+        },
+        {
+            'name': reserved_pip_name_2,
+            'id': network_id(
+                "publicIPAddresses", reserved_pip_name_2
+            ),
+            'properties': {
+                'ipAddress': '203.0.113.11',
+                'publicIPAllocationMethod': 'Static',
+                'ipConfiguration': {
+                    'id': ip_config_id(primary_wan_nic, 'ipconfig2')
                 }
             }
         }
@@ -473,9 +536,24 @@ def azure_conf() -> AzureConf:
         secondary_ips=[
             secondary_internal_ip, secondary_wan_ip
         ],
+        primary_ip_config_ids=[
+            ip_config_id(primary_internal_nic, 'ipconfig1'),
+            ip_config_id(primary_wan_nic, 'ipconfig1'),
+        ],
+        secondary_ip_config_ids=[
+            ip_config_id(secondary_internal_nic, 'ipconfig1'),
+            ip_config_id(secondary_wan_nic, 'ipconfig1'),
+        ],
+        primary_ip_config_wan_2_id=ip_config_id(
+            primary_wan_nic, 'ipconfig2'
+        ),
+        secondary_ip_config_wan_2_id=ip_config_id(
+            secondary_wan_nic, 'ipconfig2'
+        ),
         other_nic_name=other_nic,
         other_ip=other_ip,
         reserved_public_ip_name=reserved_pip_name,
+        reserved_public_ip_name_2=reserved_pip_name_2,
     )
 
 

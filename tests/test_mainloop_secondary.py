@@ -88,8 +88,7 @@ def test_secondary_takeover(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_ids[1],
-        wan_ip=azure_conf.secondary_ips[1],
+        public_ip_targets=[],
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -173,8 +172,7 @@ def test_secondary_takeover_with_azure_mock(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_ids[1],
-        wan_ip=azure_conf.secondary_ips[1],
+        public_ip_targets=[],
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -257,8 +255,7 @@ def test_secondary_no_takeover_when_primary_online(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_ids[1],
-        wan_ip=azure_conf.secondary_ips[1],
+        public_ip_targets=[],
     )
     create_local_net_context.return_value = local_net_ctx
 
@@ -317,8 +314,7 @@ def test_secondary_takeover_on_blackhole_route_with_azure_mock(
     local_net_ctx = api.LocalNetContext(
         internal_nic_id=secondary_vnic_id,
         internal_ip=secondary_ip,
-        wan_nic_id=azure_conf.secondary_nic_ids[1],
-        wan_ip=azure_conf.secondary_ips[1],
+        public_ip_targets=[],
     )
     create_local_net_context.return_value = local_net_ctx
     clients = (azure_conf.compute_client, azure_conf.network_client)

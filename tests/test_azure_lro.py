@@ -13,7 +13,7 @@ from ha_script.azure import api
 POLL_ASYNC_URL = "https://management.azure.com/subscriptions/sub/op/async/1"
 POLL_LOCATION_URL = "https://management.azure.com/subscriptions/sub/op/loc/1"
 
-# Matches the URL pattern built by AzureClient._request for a PUT
+# Matches the URL pattern built by AzureClient._url
 NIC_URL = (
     f"{api.ARM_BASE}/subscriptions/sub-id/resourceGroups/rg"
     f"/providers/Microsoft.Network/networkInterfaces/test-nic"

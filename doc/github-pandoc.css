@@ -635,6 +635,10 @@ sub{
         page-break-before:always;
         break-before:page
     }
+    #optional-properties{
+        page-break-before:always;
+        break-before:page
+    }
     img{
         max-height:13cm;
         width:auto;
